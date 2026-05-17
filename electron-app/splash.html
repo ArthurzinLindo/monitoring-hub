@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Monitoring Hub</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg-night-0: #020817;
+        --bg-night-1: #03112a;
+        --bg-night-2: #0a2f63;
+        --text-main: #e7f4ff;
+        --text-soft: #9dc3eb;
+        --accent: #1493ff;
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      html,
+      body {
+        width: 100%;
+        height: 100%;
+      }
+
+      body {
+        margin: 0;
+        display: grid;
+        place-items: center;
+        overflow: hidden;
+        font-family: "Segoe UI", "DM Sans", Arial, sans-serif;
+        color: var(--text-main);
+        background:
+          radial-gradient(circle at 70% 15%, rgba(0, 188, 242, 0.22), transparent 34%),
+          radial-gradient(circle at 18% 22%, rgba(15, 96, 185, 0.36), transparent 38%),
+          linear-gradient(150deg, var(--bg-night-0), var(--bg-night-1) 48%, var(--bg-night-2));
+      }
+
+      .splash {
+        width: 100%;
+        height: 100%;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(120, 188, 255, 0.28);
+        background: linear-gradient(140deg, rgba(8, 24, 52, 0.58), rgba(8, 30, 63, 0.42));
+      }
+
+      .content {
+        display: grid;
+        gap: 20px;
+        justify-items: center;
+        text-align: center;
+      }
+
+      h1 {
+        margin: 0;
+        font-size: 1.45rem;
+        font-weight: 700;
+        letter-spacing: 0;
+      }
+
+      p {
+        margin: -10px 0 0;
+        color: var(--text-soft);
+        font-size: 0.82rem;
+      }
+
+      .loader {
+        width: 46px;
+        height: 46px;
+        border-radius: 50%;
+        border: 3px solid rgba(157, 195, 235, 0.18);
+        border-top-color: var(--accent);
+        box-shadow: 0 0 24px rgba(20, 147, 255, 0.38);
+        animation: spin 0.82s linear infinite;
+      }
+
+      @keyframes spin {
+        to {
+          transform: rotate(360deg);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <main class="splash">
+      <section class="content" aria-label="Inicializando aplicativo">
+        <div class="loader" aria-hidden="true"></div>
+        <div>
+          <h1>Monitoring Hub</h1>
+          <p>Inicializando servidor local</p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

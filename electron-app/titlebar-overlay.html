@@ -1,0 +1,54 @@
+<div id="electron-titlebar-overlay" aria-hidden="false">
+  <style>
+    #electron-titlebar-overlay {
+      position: fixed;
+      top: 0;
+      left: 0;
+      z-index: 9999;
+      width: 100%;
+      height: 32px;
+      display: flex;
+      justify-content: flex-end;
+      align-items: stretch;
+      pointer-events: none;
+      -webkit-app-region: drag;
+    }
+
+    #electron-titlebar-overlay .electron-window-actions {
+      display: flex;
+      height: 32px;
+      pointer-events: auto;
+      -webkit-app-region: no-drag;
+    }
+
+    #electron-titlebar-overlay button {
+      width: 46px;
+      height: 32px;
+      border: none;
+      border-radius: 0;
+      background: transparent;
+      color: #d8efff;
+      cursor: pointer;
+      font-family: "Segoe UI", Arial, sans-serif;
+      font-size: 13px;
+      line-height: 32px;
+      text-align: center;
+      transition: background 0.16s ease, color 0.16s ease;
+    }
+
+    #electron-titlebar-overlay button:hover {
+      background: rgba(120, 188, 255, 0.14);
+      color: #ffffff;
+    }
+
+    #electron-titlebar-overlay #electron-close-button:hover {
+      background: #8b1a1a;
+      color: #ffffff;
+    }
+  </style>
+  <div class="electron-window-actions">
+    <button id="electron-minimize-button" type="button" aria-label="Minimizar">-</button>
+    <button id="electron-maximize-button" type="button" aria-label="Maximizar ou restaurar" title="Maximizar/restaurar">&#9633;</button>
+    <button id="electron-close-button" type="button" aria-label="Fechar">&times;</button>
+  </div>
+</div>

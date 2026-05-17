@@ -1,0 +1,74 @@
+{
+  "name": "painel-monitoria-electron",
+  "version": "1.0.0",
+  "description": "Aplicativo desktop Windows para o Monitoring Hub.",
+  "main": "main.js",
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "prebuild": "node prevent-version-overwrite.js",
+    "build": "electron-builder --win portable",
+    "version:patch": "node bump-version.js patch",
+    "version:minor": "node bump-version.js minor",
+    "version:major": "node bump-version.js major",
+    "postbuild": "node clean-dist.js"
+  },
+  "devDependencies": {
+    "electron": "^37.1.0",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.monitoringhub.desktop",
+    "productName": "Monitoring Hub",
+    "asar": true,
+    "directories": {
+      "output": "../dist"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "splash.html",
+      "titlebar-overlay.html",
+      "global-styles-injection.js",
+      "package.json",
+      "assets/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "../server.js",
+        "to": "runtime/server.js"
+      },
+      {
+        "from": "../public",
+        "to": "runtime/public"
+      },
+      {
+        "from": "../src",
+        "to": "runtime/src"
+      },
+      {
+        "from": "../node_modules",
+        "to": "runtime/node_modules",
+        "filter": [
+          "**/*",
+          "!**/.cache/**"
+        ]
+      }
+    ],
+    "win": {
+      "icon": "assets/icon.ico",
+      "target": [
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "Monitoring-Hub-${version}-Portable.${ext}",
+      "signAndEditExecutable": false
+    }
+  }
+}

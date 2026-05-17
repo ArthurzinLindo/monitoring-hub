@@ -1,0 +1,1401 @@
+const path = require("path");
+const EventEmitter = require("events");
+const fs = require("fs");
+
+const express = require("express");
+const multer = require("multer");
+
+const { DB_PATH, initializeDatabase } = require("./src/database/connection");
+const { runMigrations } = require("./src/database/migrations");
+const companyRepository = require("./src/repositories/companyRepository");
+const { normalizeKey } = require("./src/utils/text");
+const {
+  sanitizeIdentifier,
+  normalizeIdentifier,
+  buildIdentifierCandidates,
+} = require("./src/utils/identifier");
+const {
+  parseDateUtc,
+  formatBrazilDatetime,
+  formatNowBrt,
+  isStaleCollection,
+} = require("./src/utils/datetime");
+const {
+  normalizeSystem,
+  companyToPublic,
+  groupCompaniesBySystem,
+} = require("./src/utils/company");
+const {
+  isNullIp,
+  normalizeClockCode,
+  normalizeClockIdentityValue,
+  buildClockIdentityKey,
+} = require("./src/utils/clock");
+const {
+  redactSensitiveText,
+  createPublicError,
+  getPublicErrorMessage,
+  sanitizeErrorForLog,
+} = require("./src/utils/errors");
+
+const app = express();
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
+
+const PORT = Number(process.env.PORT || 8000);
+const HOST = "127.0.0.1";
+const PUBLIC_DIR = path.join(__dirname, "public");
+
+const SYSTEM_BASE_URLS = {
+  DIMEP: "https://www.dimepkairos.com.br",
+  MADIS: "https://www.mdcomune.com.br",
+};
+
+const CLOCK_SEARCH_ENDPOINT = "/RestServiceApi/Clock/SearchClocks";
+const REQUEST_PAYLOAD = { TodosRelogios: true };
+const CACHE_TTL_MS = 60 * 1000;
+const MAX_COLLECTION_AGE_MS = 60 * 60 * 1000;
+const ENVIRONMENT_ACTIVE_WINDOW_MS = 60 * 60 * 1000;
+const AUTO_REFRESH_WINDOW_MS = 90 * 60 * 1000;
+const AUTO_REFRESH_CHECK_INTERVAL_MS = 60 * 1000;
+const AUTO_REFRESH_RETRY_DELAY_MS = 15 * 60 * 1000;
+const STATUS_CONCURRENCY_LIMIT = 3;
+const PULL_STATUS_PERF_LOG_FILENAME = "pull-status-performance.log";
+
+// Regra dedicada desta empresa:
+// - remove codigos da blocklist
+// - exibe somente equipamentos com IP nulo
+const SPECIAL_COMPANY_RULES = {
+  "11b345c7-6790-4df6-a0fb-7b4bee3a2447": {
+    only_null_ip: true,
+    blocked_codes: new Set([
+      "1",
+      "2",
+      "3",
+      "4",
+      "5",
+      "6",
+      "7",
+      "8",
+      "9",
+      "10",
+      "11",
+      "12",
+      "13",
+      "14",
+      "15",
+      "17",
+      "19",
+      "20",
+      "21",
+      "22",
+      "23",
+      "104",
+      "105",
+      "133",
+      "160",
+      "161",
+      "3500",
+      "3501",
+      "3502",
+      "3504",
+      "3505",
+      "3506",
+      "3507",
+      "3508",
+      "3509",
+      "3510",
+      "3511",
+      "3512",
+      "5000",
+      "5001",
+      "6000",
+      "6001",
+      "6002",
+      "6003",
+      "6004",
+      "9998",
+      "9999",
+    ]),
+  },
+};
+
+const COMPANY_COLUMN_ALIASES = {
+  name: ["nome da empresa", "empresa", "nome", "razao social", "razaosocial"],
+  identifier: ["cnpj", "identifier", "identificador"],
+  api_key: ["api key", "apikey", "key", "chave", "chave api", "chaveapi"],
+  system: ["sistema", "fornecedor", "plataforma", "api"],
+};
+
+const CLOCK_FIELD_ALIASES = {
+  disabled: ["relogiodesativado", "relogio desativado", "isdisabled", "disabled"],
+  code: [
+    "codigo",
+    "codigorelogio",
+    "cod",
+    "clockid",
+    "idrelogio",
+    "id",
+    "relogionumero",
+    "numerorelogio",
+    "clocknumber",
+    "numero",
+  ],
+  name: ["nome", "nomerelogio", "relogionome", "descricao", "clockname"],
+  // Alias para campo solicitado no painel: NumeroFabricacao.
+  fabrication_number: [
+    "numerofabricacao",
+    "numero fabricacao",
+    "numero de fabricacao",
+    "fabricacao",
+    "numerofabricacaorelogio",
+    "numerofabricacaoequipamento",
+    "numerodeserieequipamento",
+    "numeroserie",
+    "numeroserial",
+    "nroserie",
+    "nroserial",
+    "numerodeserie",
+    "numero de serie",
+    "serialnumber",
+    "serial",
+  ],
+  ip: ["ip", "enderecoip", "endereco ip", "iprelogio", "relogioip", "host"],
+  last_collection: [
+    "ultimacoleta",
+    "ultimostatus",
+    "datahoraultimacoleta",
+    "lastcollection",
+    "ultimacomunicacao",
+    "dataultimacomunicacao",
+  ],
+  communicating: ["comunicando", "emcomunicacao", "statuscomunicacao", "iscommunicating", "online"],
+};
+
+let companies = [];
+const statusCache = new Map();
+let lastPullStatusRequestAt = null;
+let lastManualPullStatusAt = null;
+let lastAutoPullStatusAt = null;
+let nextAutoPullStatusAt = null;
+let lastAutoRefreshErrorAt = null;
+let lastAutoRefreshCompletedAt = null;
+let autoRefreshRevision = 0;
+let isPullStatusRunning = false;
+let currentPullStatusPromise = null;
+let lastPullStatusPayload = null;
+let autoRefreshTimer = null;
+let appDataInitPromise = null;
+let axiosModule = null;
+let xlsxModule = null;
+
+function getAxios() {
+  if (!axiosModule) {
+    axiosModule = require("axios");
+  }
+  return axiosModule;
+}
+
+function getXlsx() {
+  if (!xlsxModule) {
+    xlsxModule = require("xlsx");
+  }
+  return xlsxModule;
+}
+
+function startupLog(event, details = {}) {
+  const logPath = process.env.PAINEL_STARTUP_LOG_PATH;
+  if (!logPath) {
+    return;
+  }
+
+  try {
+    const fs = require("fs");
+    fs.appendFileSync(
+      logPath,
+      `[startup] ${JSON.stringify({ scope: "backend", event, ...details })}\n`,
+      "utf8",
+    );
+  } catch {
+    // Diagnostico de startup nao deve interferir na aplicacao.
+  }
+}
+
+function getLocalDataDir() {
+  if (process.env.PAINEL_MONITORIA_DATA_DIR) {
+    return process.env.PAINEL_MONITORIA_DATA_DIR;
+  }
+
+  const appDataDir = process.env.APPDATA || path.join(process.env.USERPROFILE || process.cwd(), "AppData", "Roaming");
+  return path.join(appDataDir, "Monitoring Hub");
+}
+
+function appendPullStatusPerformanceLog(payload) {
+  try {
+    const dataDir = getLocalDataDir();
+    fs.mkdirSync(dataDir, { recursive: true });
+    const logPath = path.join(dataDir, PULL_STATUS_PERF_LOG_FILENAME);
+    fs.appendFileSync(logPath, `[pull-status] ${JSON.stringify(payload)}\n`, "utf8");
+  } catch {
+    // Log de performance e diagnostico; falha aqui nao pode afetar a consulta.
+  }
+}
+
+function nowMs() {
+  return Date.now();
+}
+
+function durationSince(startedAt) {
+  return Date.now() - startedAt;
+}
+
+function getEnvironmentStatus(referenceTime = Date.now()) {
+  const environmentActive = Boolean(
+    lastPullStatusRequestAt && referenceTime - lastPullStatusRequestAt.getTime() <= ENVIRONMENT_ACTIVE_WINDOW_MS,
+  );
+
+  return {
+    environment_status: environmentActive ? "active" : "inactive",
+    environment_active: environmentActive,
+    last_pull_status_at: lastPullStatusRequestAt ? lastPullStatusRequestAt.toISOString() : null,
+    last_manual_pull_status_at: lastManualPullStatusAt ? lastManualPullStatusAt.toISOString() : null,
+    last_auto_pull_status_at: lastAutoPullStatusAt ? lastAutoPullStatusAt.toISOString() : null,
+    next_auto_pull_status_at: nextAutoPullStatusAt ? nextAutoPullStatusAt.toISOString() : null,
+    auto_refresh_enabled: true,
+    auto_refresh_running: isPullStatusRunning,
+    auto_refresh_revision: autoRefreshRevision,
+    last_auto_refresh_completed_at: lastAutoRefreshCompletedAt ? lastAutoRefreshCompletedAt.toISOString() : null,
+    environment_inactive_after_minutes: Math.round(ENVIRONMENT_ACTIVE_WINDOW_MS / 60000),
+    auto_refresh_after_minutes: Math.round(AUTO_REFRESH_WINDOW_MS / 60000),
+  };
+}
+
+function scheduleNextAutoRefresh(fromDate = new Date(), delayMs = AUTO_REFRESH_WINDOW_MS) {
+  nextAutoPullStatusAt = new Date(fromDate.getTime() + delayMs);
+}
+
+function markPullStatusRequest(trigger) {
+  const requestedAt = new Date();
+  lastPullStatusRequestAt = requestedAt;
+
+  if (trigger === "auto") {
+    lastAutoPullStatusAt = requestedAt;
+  } else if (trigger === "manual") {
+    lastManualPullStatusAt = requestedAt;
+  }
+
+  scheduleNextAutoRefresh(requestedAt);
+  return requestedAt;
+}
+
+function logAutoRefresh(event, details = {}) {
+  appendPullStatusPerformanceLog({
+    event,
+    trigger: "auto",
+    ...details,
+  });
+}
+
+function createCompanyPerformanceMetric(company, index) {
+  return {
+    index,
+    company_id: company.id,
+    company_name: company.name,
+    system: company.system,
+    identifier: company.identifier,
+    started_at: new Date().toISOString(),
+    from_cache: false,
+    http_status: null,
+    http_attempts: 0,
+    http_error_code: null,
+    external_http_ms: 0,
+    normalization_ms: 0,
+    raw_clock_count: 0,
+    active_clock_count: 0,
+    not_communicating_count: 0,
+    total_ms: 0,
+  };
+}
+
+app.use(express.json({ limit: "1mb" }));
+app.use(
+  "/static",
+  express.static(PUBLIC_DIR, {
+    etag: false,
+    maxAge: 0,
+    // Evita cache antigo de CSS/JS no navegador local.
+    setHeaders: (res) => {
+      res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+      res.setHeader("Pragma", "no-cache");
+      res.setHeader("Expires", "0");
+    },
+  })
+);
+
+function parseBool(value) {
+  if (typeof value === "boolean") return value;
+  if (typeof value === "number") return Boolean(value);
+  if (value === null || value === undefined) return null;
+
+  const text = normalizeKey(String(value));
+  if (["true", "1", "sim", "yes", "y", "online", "comunicando", "conectado", "ativo"].includes(text)) {
+    return true;
+  }
+  if (["false", "0", "nao", "na", "no", "n", "offline", "desconectado", "inativo"].includes(text)) {
+    return false;
+  }
+  return null;
+}
+
+function loadRows(fileName, rawFile) {
+  const XLSX = getXlsx();
+  const workbook = XLSX.read(rawFile, { type: "buffer", raw: false });
+  if (!workbook.SheetNames.length) return [];
+  const firstSheet = workbook.Sheets[workbook.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(firstSheet, { defval: "", raw: false });
+}
+
+function buildColumnLookup(columns) {
+  const lookup = new Map();
+  for (const column of columns) {
+    lookup.set(normalizeKey(column), column);
+  }
+  return lookup;
+}
+
+function findColumn(lookup, aliases) {
+  for (const alias of aliases) {
+    const found = lookup.get(normalizeKey(alias));
+    if (found) return found;
+  }
+  return null;
+}
+
+function getAllColumns(rows) {
+  const columnSet = new Set();
+  for (const row of rows) {
+    Object.keys(row || {}).forEach((key) => columnSet.add(String(key)));
+  }
+  return [...columnSet];
+}
+
+function parseCompanies(rawFile, fileName) {
+  let rows;
+  try {
+    rows = loadRows(fileName, rawFile);
+  } catch {
+    throw createPublicError("Arquivo invalido ou corrompido.");
+  }
+
+  if (!rows.length) {
+    throw createPublicError("Arquivo sem dados validos.");
+  }
+
+  const columnLookup = buildColumnLookup(getAllColumns(rows));
+  const nameCol = findColumn(columnLookup, COMPANY_COLUMN_ALIASES.name);
+  const identifierCol = findColumn(columnLookup, COMPANY_COLUMN_ALIASES.identifier);
+  const keyCol = findColumn(columnLookup, COMPANY_COLUMN_ALIASES.api_key);
+  const systemCol = findColumn(columnLookup, COMPANY_COLUMN_ALIASES.system);
+
+  const missing = [];
+  if (!nameCol) missing.push("Nome da empresa");
+  if (!identifierCol) missing.push("CNPJ/identifier");
+  if (!keyCol) missing.push("API key");
+  if (!systemCol) missing.push("Sistema");
+
+  if (missing.length) {
+    throw createPublicError(`Colunas obrigatorias ausentes: ${missing.join(", ")}.`);
+  }
+
+  const parsedCompanies = [];
+  const warnings = [];
+  const seen = new Set();
+
+  rows.forEach((row, index) => {
+    const rowNumber = index + 2;
+    const name = String(row[nameCol] || "").trim();
+    const identifierRaw = normalizeIdentifier(row[identifierCol]);
+    const identifierDigits = sanitizeIdentifier(identifierRaw);
+    const apiKey = String(row[keyCol] || "").trim();
+    const system = normalizeSystem(row[systemCol]);
+
+    if (!name || !identifierRaw || !apiKey || !system) {
+      warnings.push(`Linha ${rowNumber}: dados incompletos ou sistema invalido.`);
+      return;
+    }
+
+    const uniqueKey = `${system}:${identifierDigits || identifierRaw}:${apiKey}`;
+    if (seen.has(uniqueKey)) {
+      warnings.push(`Linha ${rowNumber}: empresa duplicada ignorada.`);
+      return;
+    }
+
+    seen.add(uniqueKey);
+    parsedCompanies.push({
+      id: `${system.toLowerCase()}-${identifierDigits || "semcnpj"}-${parsedCompanies.length + 1}`,
+      name,
+      identifier: identifierRaw,
+      identifier_digits: identifierDigits,
+      api_key: apiKey,
+      system,
+    });
+  });
+
+  if (!parsedCompanies.length) {
+    throw createPublicError("Nenhuma empresa valida encontrada no arquivo.");
+  }
+
+  return { companies: parsedCompanies, warnings };
+}
+
+function cacheKey(company) {
+  return `${company.system}:${company.identifier}:${company.api_key}`;
+}
+
+function getCachedStatus(company, forceRefresh) {
+  if (forceRefresh) return null;
+
+  const key = cacheKey(company);
+  const cached = statusCache.get(key);
+  if (!cached) return null;
+  if (cached.expiresAt <= Date.now()) {
+    statusCache.delete(key);
+    return null;
+  }
+
+  const payload = structuredClone(cached.payload);
+  payload.from_cache = true;
+  return payload;
+}
+
+function setCachedStatus(company, payload) {
+  const key = cacheKey(company);
+  statusCache.set(key, {
+    payload: structuredClone(payload),
+    expiresAt: Date.now() + CACHE_TTL_MS,
+  });
+}
+
+function isPrimitiveRecordValue(value) {
+  return ["string", "number", "boolean"].includes(typeof value);
+}
+
+function extractPrimitiveRecordValue(node, depth = 0) {
+  if (depth > 5 || node === undefined || node === null) {
+    return null;
+  }
+
+  if (isPrimitiveRecordValue(node)) {
+    return node;
+  }
+
+  if (Array.isArray(node)) {
+    for (const item of node) {
+      const found = extractPrimitiveRecordValue(item, depth + 1);
+      if (found !== undefined && found !== null && found !== "") {
+        return found;
+      }
+    }
+    return null;
+  }
+
+  if (typeof node !== "object") {
+    return null;
+  }
+
+  // Prioriza chaves comuns quando valor vem encapsulado em objeto.
+  const preferredKeys = ["value", "valor", "text", "texto", "name", "nome", "description", "descricao"];
+  const entries = Object.entries(node);
+
+  for (const preferredKey of preferredKeys) {
+    const match = entries.find(([rawKey]) => normalizeKey(rawKey) === preferredKey);
+    if (match) {
+      const found = extractPrimitiveRecordValue(match[1], depth + 1);
+      if (found !== undefined && found !== null && found !== "") {
+        return found;
+      }
+    }
+  }
+
+  for (const [, value] of entries) {
+    const found = extractPrimitiveRecordValue(value, depth + 1);
+    if (found !== undefined && found !== null && found !== "") {
+      return found;
+    }
+  }
+
+  return null;
+}
+
+function collectNormalizedRecordValues(node, normalizedRecord, visited, depth = 0) {
+  if (depth > 5 || node === undefined || node === null) {
+    return;
+  }
+
+  if (Array.isArray(node)) {
+    node.forEach((item) => collectNormalizedRecordValues(item, normalizedRecord, visited, depth + 1));
+    return;
+  }
+
+  if (typeof node !== "object") {
+    return;
+  }
+
+  if (visited.has(node)) {
+    return;
+  }
+  visited.add(node);
+
+  Object.entries(node).forEach(([key, value]) => {
+    const normalizedKey = normalizeKey(key);
+    if (normalizedKey && !normalizedRecord.has(normalizedKey)) {
+      const extracted = extractPrimitiveRecordValue(value, depth + 1);
+      if (extracted !== undefined && extracted !== null && extracted !== "") {
+        normalizedRecord.set(normalizedKey, extracted);
+      }
+    }
+
+    if (value && typeof value === "object") {
+      collectNormalizedRecordValues(value, normalizedRecord, visited, depth + 1);
+    }
+  });
+}
+
+function getValueFromRecord(record, aliases) {
+  const normalizedRecord = new Map();
+  collectNormalizedRecordValues(record || {}, normalizedRecord, new WeakSet());
+
+  for (const alias of aliases) {
+    const normalizedAlias = normalizeKey(alias);
+    const value = normalizedRecord.get(normalizedAlias);
+    if (value !== undefined && value !== null && value !== "") {
+      return value;
+    }
+  }
+
+  // Fallback: algumas APIs retornam nomes expandidos (ex: NumeroDeFabricacaoDoEquipamento).
+  for (const alias of aliases) {
+    const normalizedAlias = normalizeKey(alias);
+    if (normalizedAlias.length < 6) {
+      continue;
+    }
+
+    for (const [key, value] of normalizedRecord.entries()) {
+      if (key.includes(normalizedAlias) || normalizedAlias.includes(key)) {
+        if (value !== undefined && value !== null && value !== "") {
+          return value;
+        }
+      }
+    }
+  }
+
+  return null;
+}
+
+function findFabricationNumberFallback(record) {
+  const candidates = [];
+  const visited = new WeakSet();
+
+  function visit(node, depth = 0) {
+    if (depth > 6 || node === undefined || node === null) {
+      return;
+    }
+
+    if (Array.isArray(node)) {
+      node.forEach((item) => visit(item, depth + 1));
+      return;
+    }
+
+    if (typeof node !== "object") {
+      return;
+    }
+
+    if (visited.has(node)) {
+      return;
+    }
+    visited.add(node);
+
+    Object.entries(node).forEach(([rawKey, value]) => {
+      const key = normalizeKey(rawKey);
+      if (!key) {
+        return;
+      }
+
+      const isFabricationKey =
+        key.includes("numerofabricacao") ||
+        key.includes("fabricacao") ||
+        key.includes("numerodeserie") ||
+        key.includes("numeroserie") ||
+        key.includes("numeroserial") ||
+        key.includes("serialnumber") ||
+        key.includes("serial") ||
+        key.includes("serie");
+
+      if (isFabricationKey) {
+        const primitive = extractPrimitiveRecordValue(value, depth + 1);
+        const text = String(primitive ?? "").trim();
+        if (text && normalizeKey(text) !== "null") {
+          let score = 1;
+          if (key.includes("numerofabricacao")) score = 5;
+          else if (key.includes("numerodeserie") || key.includes("numeroserie") || key.includes("numeroserial")) score = 4;
+          else if (key.includes("serialnumber")) score = 3;
+          else if (key.includes("fabricacao")) score = 2;
+          candidates.push({ score, value: text });
+        }
+      }
+
+      if (value && typeof value === "object") {
+        visit(value, depth + 1);
+      }
+    });
+  }
+
+  visit(record);
+  if (!candidates.length) {
+    return null;
+  }
+
+  candidates.sort((a, b) => b.score - a.score);
+  return candidates[0].value;
+}
+
+function choosePreferredClock(existing, candidate) {
+  if (!existing.is_communicating && candidate.is_communicating) {
+    return candidate;
+  }
+  if (existing.last_collection_brt === "-" && candidate.last_collection_brt !== "-") {
+    return candidate;
+  }
+  if (existing.ip === "-" && candidate.ip !== "-") {
+    return candidate;
+  }
+  if (existing.fabrication_number === "-" && candidate.fabrication_number !== "-") {
+    return candidate;
+  }
+  if (existing.name === "Relogio sem nome" && candidate.name !== "Relogio sem nome") {
+    return candidate;
+  }
+  return existing;
+}
+
+function dedupeClocks(clocks) {
+  const uniqueClocks = new Map();
+
+  for (const clock of clocks) {
+    const key = buildClockIdentityKey(clock);
+    const existing = uniqueClocks.get(key);
+    uniqueClocks.set(key, existing ? choosePreferredClock(existing, clock) : clock);
+  }
+
+  return [...uniqueClocks.values()];
+}
+
+function normalizeClockItem(record) {
+  let communicationFlag = parseBool(getValueFromRecord(record, CLOCK_FIELD_ALIASES.communicating));
+  const disabled = parseBool(getValueFromRecord(record, CLOCK_FIELD_ALIASES.disabled));
+
+  const code = getValueFromRecord(record, CLOCK_FIELD_ALIASES.code);
+  const name = getValueFromRecord(record, CLOCK_FIELD_ALIASES.name);
+  const fabricationNumberRaw =
+    getValueFromRecord(record, CLOCK_FIELD_ALIASES.fabrication_number) ||
+    findFabricationNumberFallback(record);
+  const fabricationNumber = String(fabricationNumberRaw || "").trim();
+  const ipRaw = getValueFromRecord(record, CLOCK_FIELD_ALIASES.ip);
+  const lastCollection = getValueFromRecord(record, CLOCK_FIELD_ALIASES.last_collection);
+  const ipIsNull = isNullIp(ipRaw);
+
+  if (communicationFlag === null) {
+    communicationFlag = parseDateUtc(lastCollection) !== null;
+  }
+
+  if (isStaleCollection(lastCollection, MAX_COLLECTION_AGE_MS)) {
+    communicationFlag = false;
+  }
+
+  return {
+    code: String(code || "-"),
+    name: String(name || "Relogio sem nome"),
+    // Mantem valor pronto para exibir no card do modal.
+    fabrication_number: fabricationNumber || "-",
+    ip: ipIsNull ? "-" : String(ipRaw).trim(),
+    ip_is_null: ipIsNull,
+    last_collection_brt: formatBrazilDatetime(lastCollection),
+    is_communicating: Boolean(communicationFlag),
+    is_disabled: Boolean(disabled),
+  };
+}
+
+function applyCompanySpecificFilters(company, clocks) {
+  const apiKey = String(company.api_key || "").trim().toLowerCase();
+  const rule = SPECIAL_COMPANY_RULES[apiKey];
+  if (!rule) return clocks;
+
+  let filtered = clocks.filter((clock) => !rule.blocked_codes.has(normalizeClockCode(clock.code)));
+  if (rule.only_null_ip) {
+    filtered = filtered.filter((clock) => Boolean(clock.ip_is_null));
+  }
+  return filtered;
+}
+
+function findClockList(node) {
+  if (Array.isArray(node)) {
+    if (!node.length) return [];
+    if (node.every((item) => item && typeof item === "object" && !Array.isArray(item))) {
+      return node;
+    }
+    return null;
+  }
+
+  if (!node || typeof node !== "object") {
+    return null;
+  }
+
+  const preferredKeys = new Set(["relogios", "clocklist", "clocks", "lista", "items", "dados", "data", "resultado", "result", "obj"]);
+
+  for (const [key, value] of Object.entries(node)) {
+    if (preferredKeys.has(normalizeKey(key)) && Array.isArray(value)) {
+      return value;
+    }
+  }
+
+  for (const value of Object.values(node)) {
+    const found = findClockList(value);
+    if (found !== null) {
+      return found;
+    }
+  }
+
+  return null;
+}
+
+function extractHttpErrorMessage(errorResponse, secrets = []) {
+  const payload = errorResponse?.data;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    for (const key of ["message", "mensagem", "error", "detail", "erro"]) {
+      const value = payload[key];
+      if (typeof value === "string" && value.trim()) {
+        return redactSensitiveText(value.trim(), secrets).slice(0, 180);
+      }
+    }
+  }
+
+  if (typeof payload === "string" && payload.trim()) {
+    return redactSensitiveText(payload.trim(), secrets).slice(0, 180);
+  }
+
+  return "Sem detalhe retornado pela API.";
+}
+
+function buildApiHeaders(baseUrl, identifier, apiKey) {
+  return {
+    identifier,
+    key: apiKey,
+    "Content-Type": "application/json",
+    Accept: "application/json, text/plain, */*",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+    Referer: `${baseUrl}/swagger/ui/index#/`,
+    Origin: baseUrl,
+    "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+  };
+}
+
+async function fetchApiPayload(company, perfMetric = null) {
+  const axios = getAxios();
+  const baseUrl = SYSTEM_BASE_URLS[company.system];
+  const endpoint = `${baseUrl}${CLOCK_SEARCH_ENDPOINT}`;
+  const identifiers = buildIdentifierCandidates(company.identifier);
+
+  let lastError = null;
+
+  for (let i = 0; i < identifiers.length; i += 1) {
+    const identifier = identifiers[i];
+    const httpStartedAt = nowMs();
+    let response;
+
+    try {
+      response = await axios.post(endpoint, REQUEST_PAYLOAD, {
+        headers: buildApiHeaders(baseUrl, identifier, company.api_key),
+        timeout: 25000,
+        validateStatus: () => true,
+      });
+    } catch (error) {
+      if (perfMetric) {
+        perfMetric.http_attempts += 1;
+        perfMetric.external_http_ms += durationSince(httpStartedAt);
+        perfMetric.http_error_code = error.code || error.name || "REQUEST_ERROR";
+      }
+      throw error;
+    }
+
+    if (perfMetric) {
+      perfMetric.http_attempts += 1;
+      perfMetric.external_http_ms += durationSince(httpStartedAt);
+      perfMetric.http_status = response.status;
+    }
+
+    if (response.status === 403 && i < identifiers.length - 1) {
+      continue;
+    }
+
+    if (response.status >= 200 && response.status < 300) {
+      return response.data;
+    }
+
+    const err = new Error(`HTTP ${response.status}`);
+    err.response = response;
+    lastError = err;
+    break;
+  }
+
+  if (lastError) throw lastError;
+  throw new Error("Falha ao autenticar na API.");
+}
+
+function buildErrorStatus(company, message) {
+  return {
+    ...companyToPublic(company),
+    status: "error",
+    error: redactSensitiveText(message, [company.api_key]),
+    from_cache: false,
+    active_clock_count: 0,
+    communicating_count: 0,
+    not_communicating_count: 0,
+    clocks: [],
+    updated_at: formatNowBrt(),
+  };
+}
+
+function buildApiFailureStatus(company, error) {
+  if (error.response) {
+    return buildErrorStatus(
+      company,
+      `Falha HTTP na API (${error.response.status}): ${extractHttpErrorMessage(error.response, [company.api_key])}`,
+    );
+  }
+
+  if (error.code === "ECONNABORTED" || error.code === "ETIMEDOUT") {
+    return buildErrorStatus(company, "Tempo limite ao conectar com a API da empresa.");
+  }
+
+  if (["ENOTFOUND", "ECONNRESET", "ECONNREFUSED", "EAI_AGAIN"].includes(error.code)) {
+    return buildErrorStatus(company, "Nao foi possivel conectar com a API da empresa.");
+  }
+
+  if (error instanceof SyntaxError) {
+    return buildErrorStatus(company, "Resposta da API invalida (JSON malformado).");
+  }
+
+  return buildErrorStatus(company, "Nao foi possivel conectar com a API da empresa.");
+}
+
+async function mapWithConcurrency(items, limit, mapper) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      results[currentIndex] = await mapper(items[currentIndex], currentIndex);
+    }
+  }
+
+  const workerCount = Math.min(limit, items.length);
+  await Promise.all(Array.from({ length: workerCount }, worker));
+  return results;
+}
+
+async function pullCompanyStatus(company, forceRefresh, perfMetric = null) {
+  const companyStartedAt = nowMs();
+  const cached = getCachedStatus(company, forceRefresh);
+  if (cached) {
+    if (perfMetric) {
+      perfMetric.from_cache = true;
+      perfMetric.raw_clock_count = Array.isArray(cached.clocks) ? cached.clocks.length : 0;
+      perfMetric.active_clock_count = Number(cached.active_clock_count) || 0;
+      perfMetric.not_communicating_count = Number(cached.not_communicating_count) || 0;
+      perfMetric.total_ms = durationSince(companyStartedAt);
+    }
+    return cached;
+  }
+
+  try {
+    const payload = await fetchApiPayload(company, perfMetric);
+    const normalizationStartedAt = nowMs();
+    const rawClocks = findClockList(payload) || [];
+    const normalizedClocks = rawClocks
+      .filter((item) => item && typeof item === "object" && !Array.isArray(item))
+      .map(normalizeClockItem);
+
+    let activeClocks = normalizedClocks.filter((item) => !item.is_disabled);
+    activeClocks = applyCompanySpecificFilters(company, activeClocks);
+    activeClocks = dedupeClocks(activeClocks);
+
+    const communicating = activeClocks.filter((item) => item.is_communicating);
+    const notCommunicating = activeClocks.filter((item) => !item.is_communicating);
+
+    const status = !activeClocks.length || notCommunicating.length ? "error" : "ok";
+    const errorMessage = !activeClocks.length ? "Nenhum relogio ativo encontrado." : null;
+
+    const responsePayload = {
+      ...companyToPublic(company),
+      status,
+      error: errorMessage,
+      from_cache: false,
+      active_clock_count: activeClocks.length,
+      communicating_count: communicating.length,
+      not_communicating_count: notCommunicating.length,
+      clocks: activeClocks,
+      updated_at: formatNowBrt(),
+    };
+
+    if (perfMetric) {
+      perfMetric.raw_clock_count = rawClocks.length;
+      perfMetric.active_clock_count = activeClocks.length;
+      perfMetric.not_communicating_count = notCommunicating.length;
+      perfMetric.normalization_ms = durationSince(normalizationStartedAt);
+      perfMetric.total_ms = durationSince(companyStartedAt);
+    }
+
+    setCachedStatus(company, responsePayload);
+    return responsePayload;
+  } catch (error) {
+    if (perfMetric) {
+      perfMetric.total_ms = durationSince(companyStartedAt);
+    }
+    return buildApiFailureStatus(company, error);
+  }
+}
+
+async function initializeAppData() {
+  if (appDataInitPromise) {
+    return appDataInitPromise;
+  }
+
+  appDataInitPromise = (async () => {
+    const totalStartedAt = Date.now();
+    let startedAt = Date.now();
+    await initializeDatabase();
+    startupLog("initialize_database_finished", { duration_ms: Date.now() - startedAt });
+
+    startedAt = Date.now();
+    await runMigrations();
+    startupLog("run_migrations_finished", { duration_ms: Date.now() - startedAt });
+
+    startedAt = Date.now();
+    companies = await companyRepository.listCompanies();
+    startupLog("companies_loaded", {
+      duration_ms: Date.now() - startedAt,
+      count: companies.length,
+    });
+    statusCache.clear();
+    startAutoRefreshTimer();
+    startupLog("app_data_initialized", { duration_ms: Date.now() - totalStartedAt });
+  })();
+
+  return appDataInitPromise;
+}
+
+app.get("/", (_req, res) => {
+  res.sendFile(path.join(PUBLIC_DIR, "index.html"), (error) => {
+    if (error) {
+      console.error("Falha ao servir index.html:", sanitizeErrorForLog(error));
+      res.status(500).json({ detail: "Erro interno no servidor." });
+    }
+  });
+});
+
+app.get("/api/health", (_req, res) => {
+  triggerAutoRefreshIfDue("health").catch((error) => {
+    logAutoRefresh("auto_refresh_unexpected_error", { reason: "health", error: sanitizeErrorForLog(error) });
+  });
+
+  res.json({
+    status: "ok",
+    ...getEnvironmentStatus(),
+  });
+});
+
+app.get("/api/template/companies", (_req, res) => {
+  const XLSX = getXlsx();
+  const rows = [
+    {
+      "Nome da empresa": "Empresa Exemplo DIMEP",
+      CNPJ: "12.345.678/0001-90",
+      "API Key": "sua-chave-api-dimep",
+      Sistema: "DIMEP",
+    },
+    {
+      "Nome da empresa": "Empresa Exemplo MADIS",
+      CNPJ: "98.765.432/0001-10",
+      "API Key": "sua-chave-api-madis",
+      Sistema: "MADIS",
+    },
+  ];
+
+  const wb = XLSX.utils.book_new();
+  const ws = XLSX.utils.json_to_sheet(rows);
+  XLSX.utils.book_append_sheet(wb, ws, "Empresas");
+  const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="modelo-empresas.xlsx"; filename*=UTF-8\'\'modelo-empresas.xlsx');
+  res.send(buffer);
+});
+
+app.get("/api/companies", (_req, res) => {
+  const publicCompanies = companies.map(companyToPublic);
+  res.json({
+    total: publicCompanies.length,
+    grouped: groupCompaniesBySystem(publicCompanies),
+    companies: publicCompanies,
+  });
+});
+
+app.post("/api/import-companies", upload.single("file"), async (req, res) => {
+  try {
+    if (!req.file || !req.file.originalname) {
+      return res.status(400).json({ detail: "Arquivo invalido." });
+    }
+
+    const extension = path.extname(req.file.originalname || "").toLowerCase();
+    if (![".xlsx", ".xls", ".csv"].includes(extension)) {
+      return res.status(400).json({ detail: "Formato invalido. Use .xlsx, .xls ou .csv." });
+    }
+
+    if (!req.file.buffer?.length) {
+      return res.status(400).json({ detail: "Arquivo vazio." });
+    }
+
+    const parsed = parseCompanies(req.file.buffer, req.file.originalname);
+    await companyRepository.replaceCompanies(parsed.companies);
+    companies = parsed.companies;
+    statusCache.clear();
+    lastPullStatusPayload = null;
+
+    const publicCompanies = companies.map(companyToPublic);
+    return res.json({
+      total: publicCompanies.length,
+      warnings: parsed.warnings,
+      grouped: groupCompaniesBySystem(publicCompanies),
+      companies: publicCompanies,
+    });
+  } catch (error) {
+    return res.status(400).json({ detail: getPublicErrorMessage(error, "Falha ao importar planilha.") });
+  }
+});
+
+async function runPullStatus({ forceRefresh = false, trigger = "manual" } = {}) {
+  const endpointStartedAt = nowMs();
+  const requestId = `${trigger}-${endpointStartedAt}-${Math.random().toString(16).slice(2, 8)}`;
+  const companyMetrics = [];
+
+  if (!companies.length) {
+    appendPullStatusPerformanceLog({
+      request_id: requestId,
+      event: "empty_companies",
+      trigger,
+      total_ms: durationSince(endpointStartedAt),
+      force_refresh: forceRefresh,
+    });
+    throw createPublicError("Importe um arquivo Excel antes de puxar status.");
+  }
+
+  const systemCounts = companies.reduce(
+    (acc, company) => {
+      acc[company.system] = (acc[company.system] || 0) + 1;
+      return acc;
+    },
+    { DIMEP: 0, MADIS: 0 },
+  );
+
+  const results = await mapWithConcurrency(companies, STATUS_CONCURRENCY_LIMIT, async (company, index) => {
+    const metric = createCompanyPerformanceMetric(company, index);
+    companyMetrics.push(metric);
+    try {
+      return await pullCompanyStatus(company, forceRefresh, metric);
+    } catch (error) {
+      console.error("Falha inesperada ao consultar empresa:", sanitizeErrorForLog(error, {
+        company_id: company.id,
+        system: company.system,
+        identifier: company.identifier,
+      }));
+      metric.total_ms = metric.total_ms || durationSince(Date.parse(metric.started_at));
+      return buildErrorStatus(company, "Erro interno ao consultar status da empresa.");
+    }
+  });
+  results.sort((a, b) => {
+    const systemOrder = a.system.localeCompare(b.system, "pt-BR");
+    if (systemOrder !== 0) return systemOrder;
+    return String(a.name || "").localeCompare(String(b.name || ""), "pt-BR");
+  });
+
+  const responsePayload = {
+    total: results.length,
+    updated_at: formatNowBrt(),
+    summary: {
+      healthy_companies: results.filter((item) => item.status === "ok").length,
+      unhealthy_companies: results.filter((item) => item.status === "error").length,
+      from_cache: results.filter((item) => item.from_cache).length,
+    },
+    grouped: groupCompaniesBySystem(results),
+    companies: results,
+  };
+
+  const responseAssemblyStartedAt = nowMs();
+  const response_assembly_ms = durationSince(responseAssemblyStartedAt);
+  const endpoint_total_ms = durationSince(endpointStartedAt);
+  const cachedCompanies = companyMetrics.filter((item) => item.from_cache).length;
+  const externalCompanies = companyMetrics.length - cachedCompanies;
+  const totalExternalHttpMs = companyMetrics.reduce((acc, item) => acc + item.external_http_ms, 0);
+  const totalNormalizationMs = companyMetrics.reduce((acc, item) => acc + item.normalization_ms, 0);
+  const totalCompanyMs = companyMetrics.reduce((acc, item) => acc + item.total_ms, 0);
+  const aggregateInternalProcessingMs = companyMetrics.reduce(
+    (acc, item) => acc + Math.max(0, item.total_ms - item.external_http_ms),
+    0,
+  );
+  const slowestCompany = [...companyMetrics].sort((a, b) => b.total_ms - a.total_ms)[0] || null;
+
+  appendPullStatusPerformanceLog({
+    request_id: requestId,
+    event: "completed",
+    trigger,
+    force_refresh: forceRefresh,
+    endpoint_total_ms,
+    companies_total: companies.length,
+    systems: systemCounts,
+    cached_companies: cachedCompanies,
+    external_companies: externalCompanies,
+    concurrency_limit: STATUS_CONCURRENCY_LIMIT,
+    average_company_ms: companyMetrics.length ? Math.round(totalCompanyMs / companyMetrics.length) : 0,
+    slowest_company: slowestCompany
+      ? {
+          company_id: slowestCompany.company_id,
+          company_name: slowestCompany.company_name,
+          system: slowestCompany.system,
+          identifier: slowestCompany.identifier,
+          total_ms: slowestCompany.total_ms,
+          external_http_ms: slowestCompany.external_http_ms,
+          http_status: slowestCompany.http_status,
+        }
+      : null,
+    total_external_http_ms: totalExternalHttpMs,
+    total_normalization_ms: totalNormalizationMs,
+    response_assembly_ms,
+    aggregate_internal_processing_ms: aggregateInternalProcessingMs,
+    endpoint_non_external_wall_ms: Math.max(0, endpoint_total_ms - Math.max(...companyMetrics.map((item) => item.external_http_ms), 0)),
+    companies: companyMetrics.sort((a, b) => a.index - b.index),
+  });
+
+  lastPullStatusPayload = structuredClone(responsePayload);
+  return responsePayload;
+}
+
+function startPullStatusRun(options) {
+  if (currentPullStatusPromise) {
+    appendPullStatusPerformanceLog({
+      event: "join_running_pull_status",
+      trigger: options.trigger || "manual",
+    });
+    return currentPullStatusPromise;
+  }
+
+  isPullStatusRunning = true;
+  currentPullStatusPromise = runPullStatus(options)
+    .finally(() => {
+      isPullStatusRunning = false;
+      currentPullStatusPromise = null;
+    });
+
+  return currentPullStatusPromise;
+}
+
+async function triggerAutoRefreshIfDue(reason = "timer") {
+  const referenceTime = Date.now();
+  if (!lastPullStatusRequestAt || !nextAutoPullStatusAt || referenceTime < nextAutoPullStatusAt.getTime()) {
+    return false;
+  }
+
+  if (!companies.length) {
+    logAutoRefresh("auto_refresh_skipped_empty_companies", { reason });
+    scheduleNextAutoRefresh(new Date(referenceTime), AUTO_REFRESH_RETRY_DELAY_MS);
+    return false;
+  }
+
+  if (isPullStatusRunning || currentPullStatusPromise) {
+    logAutoRefresh("auto_refresh_skipped_running", { reason });
+    return false;
+  }
+
+  if (lastAutoRefreshErrorAt && referenceTime - lastAutoRefreshErrorAt.getTime() < AUTO_REFRESH_RETRY_DELAY_MS) {
+    return false;
+  }
+
+  markPullStatusRequest("auto");
+  logAutoRefresh("auto_refresh_started", {
+    reason,
+    companies_total: companies.length,
+    next_auto_pull_status_at: nextAutoPullStatusAt ? nextAutoPullStatusAt.toISOString() : null,
+  });
+
+  try {
+    await startPullStatusRun({ forceRefresh: false, trigger: "auto" });
+    lastAutoRefreshErrorAt = null;
+    lastAutoRefreshCompletedAt = new Date();
+    autoRefreshRevision += 1;
+    logAutoRefresh("auto_refresh_completed", {
+      revision: autoRefreshRevision,
+      completed_at: lastAutoRefreshCompletedAt.toISOString(),
+    });
+    return true;
+  } catch (error) {
+    lastAutoRefreshErrorAt = new Date();
+    scheduleNextAutoRefresh(lastAutoRefreshErrorAt, AUTO_REFRESH_RETRY_DELAY_MS);
+    logAutoRefresh("auto_refresh_failed", {
+      error: sanitizeErrorForLog(error),
+      retry_after_minutes: Math.round(AUTO_REFRESH_RETRY_DELAY_MS / 60000),
+    });
+    return false;
+  }
+}
+
+function startAutoRefreshTimer() {
+  if (autoRefreshTimer) {
+    return;
+  }
+
+  autoRefreshTimer = setInterval(() => {
+    triggerAutoRefreshIfDue("timer").catch((error) => {
+      logAutoRefresh("auto_refresh_unexpected_error", { error: sanitizeErrorForLog(error) });
+    });
+  }, AUTO_REFRESH_CHECK_INTERVAL_MS);
+
+  if (typeof autoRefreshTimer.unref === "function") {
+    autoRefreshTimer.unref();
+  }
+
+  logAutoRefresh("auto_refresh_scheduled", {
+    check_interval_ms: AUTO_REFRESH_CHECK_INTERVAL_MS,
+    auto_refresh_after_minutes: Math.round(AUTO_REFRESH_WINDOW_MS / 60000),
+  });
+}
+
+app.post("/api/pull-status", async (req, res) => {
+  const source = String(req.body?.source || "manual");
+  if (source === "auto_refresh_sync") {
+    if (!lastPullStatusPayload) {
+      return res.status(409).json({ detail: "Nenhum status automatico disponivel para sincronizacao." });
+    }
+
+    return res.json(structuredClone(lastPullStatusPayload));
+  }
+
+  const forceRefresh = Boolean(req.body?.force_refresh);
+  markPullStatusRequest("manual");
+
+  try {
+    const responsePayload = await startPullStatusRun({ forceRefresh, trigger: "manual" });
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    return res.send(JSON.stringify(responsePayload));
+  } catch (error) {
+    if (error && error.publicMessage) {
+      return res.status(400).json({ detail: error.publicMessage });
+    }
+
+    console.error("Falha ao puxar status:", sanitizeErrorForLog(error));
+    appendPullStatusPerformanceLog({
+      event: "failed",
+      trigger: "manual",
+      error: sanitizeErrorForLog(error),
+    });
+    return res.status(500).json({ detail: "Erro interno ao consultar status. Tente novamente." });
+  }
+});
+
+app.use((error, _req, res, _next) => {
+  console.error("Erro interno no Express:", sanitizeErrorForLog(error));
+  if (error instanceof SyntaxError && error.status === 400 && "body" in error) {
+    return res.status(400).json({ detail: "JSON invalido na requisicao." });
+  }
+  if (error && error.code === "LIMIT_FILE_SIZE") {
+    return res.status(400).json({ detail: "Arquivo excede 10MB." });
+  }
+  return res.status(500).json({ detail: "Erro interno no servidor." });
+});
+
+let serverInstance = null;
+let serverStartPromise = null;
+
+function startServer(port = PORT) {
+  if (serverInstance) {
+    return serverInstance;
+  }
+
+  const startupEmitter = new EventEmitter();
+
+  serverStartPromise = initializeAppData()
+    .then(() => {
+      serverInstance = app.listen(port, HOST, () => {
+        // Mensagem simples para diagnostico em execucao local, sem expor credenciais.
+        console.log(`Servidor Node ativo em http://${HOST}:${port}`);
+        console.log(`Banco local SQLite: ${DB_PATH}`);
+        startupEmitter.emit("listening");
+      });
+
+      serverInstance.on("error", (error) => startupEmitter.emit("error", error));
+      serverInstance.on("close", () => startupEmitter.emit("close"));
+    })
+    .catch((error) => {
+      process.nextTick(() => startupEmitter.emit("error", error));
+    });
+
+  return startupEmitter;
+}
+
+async function startStandaloneServer(port = PORT) {
+  await initializeAppData();
+
+  serverInstance = app.listen(port, HOST, () => {
+    // Mensagem simples para diagnostico em execucao local, sem expor credenciais.
+    console.log(`Servidor Node ativo em http://${HOST}:${port}`);
+    console.log(`Banco local SQLite: ${DB_PATH}`);
+  });
+
+  return serverInstance;
+}
+
+function stopServer() {
+  if (!serverInstance) {
+    return serverStartPromise ? serverStartPromise.then(() => (serverInstance ? stopServer() : undefined)) : Promise.resolve();
+  }
+
+  return new Promise((resolve, reject) => {
+    serverInstance.close((error) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      serverInstance = null;
+      serverStartPromise = null;
+      resolve();
+    });
+  });
+}
+
+module.exports = {
+  app,
+  initializeAppData,
+  startServer,
+  stopServer,
+};
+
+if (require.main === module) {
+  startStandaloneServer(PORT).catch((error) => {
+    console.error("Falha ao iniciar servidor local:", sanitizeErrorForLog(error));
+    process.exit(1);
+  });
+}
+
+

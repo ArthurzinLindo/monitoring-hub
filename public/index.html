@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Monitor de Comunicacao de Relogios</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="bg-atmosphere" aria-hidden="true"></div>
+
+    <main class="app-shell">
+          <header class="hero-card panel-glass">
+            <div class="hero-left">
+              <h1>Clock Monitoring Hub</h1>
+              <p class="hero-description">
+                Dashboard local para acompanhar, por empresa, a comunicacao dos relogios integrados
+                aos sistemas DIMEP e MADIS.
+              </p>
+              <div class="hero-tags">
+                <span class="tag">Upload de Excel</span>
+                <span class="tag">Consulta por API</span>
+                <span class="tag">Leitura por sistema</span>
+              </div>
+            </div>
+
+            <div class="hero-right">
+              <div id="environmentStatusPill" class="status-pill status-pill-inactive">
+                <span class="status-dot-live" aria-hidden="true"></span>
+                <span id="environmentStatusText">Ambiente local inativo</span>
+              </div>
+              <div class="time-card">
+                <p>Horario atual</p>
+                <strong id="currentTime">--:--:--</strong>
+              </div>
+            </div>
+          </header>
+
+          <section class="top-grid">
+            <article class="panel-glass data-panel">
+              <div class="panel-head">
+                <div>
+                  <p class="section-kicker">Base de Dados</p>
+                  <h2>Importacao de empresas</h2>
+                  <p class="section-description">
+                    Importe a planilha com as empresas monitoradas para organizar o painel automaticamente.
+                  </p>
+                </div>
+                <a class="btn btn-template" href="/api/template/companies" download="modelo-empresas.xlsx">Baixar modelo Excel</a>
+              </div>
+
+              <div class="upload-row">
+                <label class="file-input">
+                  <span>Selecionar arquivo Excel</span>
+                  <small>Use uma planilha com Nome da empresa, CNPJ, API Key e Sistema.</small>
+                  <input id="excelInput" type="file" accept=".xlsx,.xls,.csv" />
+                </label>
+                <button id="importButton" class="btn btn-primary" type="button">Importar planilha</button>
+              </div>
+
+              <div class="summary-grid">
+                <article class="summary-item">
+                  <p>Total de empresas</p>
+                  <strong id="totalCompanies">0</strong>
+                </article>
+                <article class="summary-item">
+                  <p>Empresas DIMEP</p>
+                  <strong id="dimepCompanies">0</strong>
+                </article>
+                <article class="summary-item">
+                  <p>Empresas MADIS</p>
+                  <strong id="madisCompanies">0</strong>
+                </article>
+                <article class="summary-item">
+                  <p>Ultima atualizacao</p>
+                  <strong id="lastUpdateLabel">-</strong>
+                </article>
+              </div>
+
+              <section id="desktopSettingsPanel" class="desktop-settings hidden" aria-label="Configuracoes do aplicativo">
+                <p class="section-kicker">Configuracoes do Aplicativo</p>
+                <div class="desktop-settings-grid">
+                  <button id="startWithWindowsToggle" class="setting-toggle" type="button" aria-pressed="false">
+                    <span>
+                      <strong>Inicializar com Windows</strong>
+                      <small>Abre o Monitoring Hub junto com o Windows.</small>
+                    </span>
+                    <i aria-hidden="true"></i>
+                  </button>
+
+                  <button id="minimizeToTrayToggle" class="setting-toggle" type="button" aria-pressed="false">
+                    <span>
+                      <strong>Rodar em segundo plano</strong>
+                      <small>O X oculta o app na bandeja em vez de encerrar.</small>
+                    </span>
+                    <i aria-hidden="true"></i>
+                  </button>
+                </div>
+                <p id="desktopSettingsFeedback" class="settings-feedback" role="status" aria-live="polite"></p>
+              </section>
+            </article>
+
+            <aside class="panel-glass ops-panel">
+              <p class="section-kicker">Operacao</p>
+              <h2>Status geral</h2>
+
+              <div class="status-stack">
+                <article class="status-card ok-bg">
+                  <p>Comunicando</p>
+                  <strong id="communicatingClocks">0</strong>
+                </article>
+                <article class="status-card error-bg">
+                  <p>Sem comunicacao</p>
+                  <strong id="offlineClocks">0</strong>
+                </article>
+                <article class="status-card warn-bg">
+                  <p>Empresas com erro</p>
+                  <strong id="errorCompanies">0</strong>
+                </article>
+              </div>
+
+              <button id="pullStatusButton" class="btn btn-cta" type="button" disabled>Puxar Status</button>
+
+              <p id="feedback" class="feedback" role="status" aria-live="polite"></p>
+
+              <p id="cacheLabel" class="cache-label">Cache ativo: 0</p>
+            </aside>
+          </section>
+
+          <section class="systems-tabs panel-glass">
+            <button id="tabDimep" class="tab-button active" type="button" data-system="DIMEP">DIMEP</button>
+            <button id="tabMadis" class="tab-button" type="button" data-system="MADIS">MADIS</button>
+          </section>
+
+      <section class="bottom-grid">
+        <article class="panel-glass companies-panel">
+          <div class="panel-head compact">
+            <div>
+              <p id="selectedSystemKicker" class="section-kicker">Sistema DIMEP</p>
+              <h2>Empresas monitoradas</h2>
+              <p class="section-description">Visualizacao dedicada por sistema selecionado.</p>
+            </div>
+            <span id="monitoredCount" class="count-badge">0 empresa(s)</span>
+          </div>
+
+          <div class="company-controls" aria-label="Filtros da lista de empresas">
+            <label class="company-search">
+              <span>Buscar empresa</span>
+              <input
+                id="companySearchInput"
+                type="search"
+                placeholder="Nome ou CNPJ"
+                autocomplete="off"
+              />
+            </label>
+
+            <div class="company-filter-group" aria-label="Filtrar por status">
+              <button id="companyFilterAll" class="company-filter-button active" type="button" data-filter="all">Todas</button>
+              <button id="companyFilterOffline" class="company-filter-button" type="button" data-filter="offline">Sem comunicacao</button>
+              <button id="companyFilterOk" class="company-filter-button" type="button" data-filter="ok">Comunicando</button>
+              <button id="companySortAlphabetical" class="company-filter-button" type="button" aria-pressed="false">A-Z</button>
+            </div>
+          </div>
+
+          <div id="companyList" class="company-list"></div>
+        </article>
+      </section>
+    </main>
+
+    <div id="loadingOverlay" class="loading-overlay hidden" aria-hidden="true">
+      <div class="loader-card panel-glass">
+        <svg class="infinity-loader" viewBox="0 0 160 80" role="img" aria-label="Carregando">
+          <defs>
+            <linearGradient id="infinityLoaderGradient" x1="28" y1="40" x2="132" y2="40" gradientUnits="userSpaceOnUse">
+              <stop offset="0%" stop-color="#5ee7ff"></stop>
+              <stop offset="52%" stop-color="#e8f7ff"></stop>
+              <stop offset="100%" stop-color="#1493ff"></stop>
+            </linearGradient>
+          </defs>
+          <path
+            class="infinity-loader-track"
+            d="M 42 40 C 42 18, 72 18, 80 40 C 88 62, 118 62, 118 40 C 118 18, 88 18, 80 40 C 72 62, 42 62, 42 40"
+          ></path>
+          <path
+            class="infinity-loader-line"
+            d="M 42 40 C 42 18, 72 18, 80 40 C 88 62, 118 62, 118 40 C 118 18, 88 18, 80 40 C 72 62, 42 62, 42 40"
+          ></path>
+        </svg>
+        <p id="loadingText">Consultando APIs...</p>
+      </div>
+    </div>
+
+    <div id="companyModal" class="modal hidden" aria-hidden="true">
+      <div class="modal-backdrop" data-close-modal="true"></div>
+      <div class="modal-content panel-glass" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+        <header class="modal-header">
+          <div>
+            <h3 id="modalTitle">Detalhes da Empresa</h3>
+            <p id="modalSubtitle">-</p>
+          </div>
+          <button id="closeModalButton" class="icon-button" type="button" aria-label="Fechar modal">&times;</button>
+        </header>
+
+        <div class="modal-filters">
+          <button id="showAllBtn" class="btn btn-ghost active" type="button">Todos</button>
+          <button id="showOnlineBtn" class="btn btn-success" type="button">Comunicando</button>
+          <button id="showOfflineBtn" class="btn btn-danger" type="button">Sem comunicacao</button>
+        </div>
+
+        <div class="modal-cards-wrapper">
+          <!-- Lista de blocos de relogio (substitui tabela tradicional). -->
+          <div id="modalCardsGrid" class="modal-cards-grid"></div>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
