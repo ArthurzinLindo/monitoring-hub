@@ -1,28 +1,28 @@
-﻿# Monitoring Hub - Painel de Monitoria de Relogios
+﻿# Monitoring Hub - Painel de Monitoria de Relógios
 
-Aplicacao local para monitorar a comunicacao de relogios de ponto de empresas integradas aos sistemas DIMEP e MADIS.
+Aplicação local para monitoramento da comunicação de relógios de ponto de empresas integradas aos sistemas DIMEP e MADIS.
 
-O projeto roda como servidor local Node.js/Express e tambem e distribuido atualmente como aplicativo desktop Windows em formato Electron portable. Nesta etapa nao existe instalador NSIS/MSI.
+O projeto roda como servidor local em Node.js/Express e também é distribuído como aplicativo desktop Windows em formato Electron portable. Nesta etapa, não há instalador NSIS/MSI.
 
 ## Stack atual
 
-- Backend: Node.js + Express
-- Frontend: HTML, CSS e JavaScript puro em `public/`
-- Persistencia local: SQLite via `sql.js`
-- Banco local: `%APPDATA%\Monitoring Hub\painel-monitoria.sqlite`
-- Desktop: Electron portable
-- Testes: `node:test`
+- **Backend:** Node.js + Express
+- **Frontend:** HTML, CSS e JavaScript puro
+- **Persistência local:** SQLite via sql.js
+- **Banco local:** `%APPDATA%\Monitoring Hub\painel-monitoria.sqlite`
+- **Desktop:** Electron portable
+- **Testes:** node:test
 
 ## Como executar localmente
 
-No diretorio do projeto:
+No diretório do projeto:
 
-```powershell
+```bash
 npm install
 npm start
 ```
 
-A aplicacao fica disponivel em:
+A aplicação ficará disponível em:
 
 ```text
 http://127.0.0.1:8000
@@ -30,15 +30,15 @@ http://127.0.0.1:8000
 
 O backend escuta somente em `127.0.0.1`.
 
-### PowerShell auxiliar
+## PowerShell auxiliar
 
-Se `node` ou `npm` nao estiverem no PATH:
+Caso `node` ou `npm` não estejam configurados corretamente no PATH:
 
 ```powershell
 .\run-local.ps1
 ```
 
-Se a politica do PowerShell bloquear scripts locais:
+Se a política do PowerShell bloquear scripts locais:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\run-local.ps1
@@ -46,45 +46,73 @@ powershell -ExecutionPolicy Bypass -File .\run-local.ps1
 
 ## Como gerar o Electron portable
 
-O app desktop fica em `electron-app/`.
+O app desktop fica em:
 
-```powershell
+```text
+electron-app/
+```
+
+Para instalar as dependências e gerar a build:
+
+```bash
 npm install --prefix electron-app
 npm run build --prefix electron-app
 ```
 
-A versao do desktop e definida em `electron-app/package.json`. O Electron Builder usa essa versao para gerar o arquivo em `dist/` no formato:
+A versão do desktop é definida em:
+
+```text
+electron-app/package.json
+```
+
+O Electron Builder utiliza essa versão para gerar o arquivo portable em `dist/`, no formato:
 
 ```text
 Monitoring-Hub-<versao>-Portable.exe
 ```
 
-A release estavel atual e `Monitoring Hub 1.0.0`, gerada como:
+A release estável atual é:
 
 ```text
-Monitoring-Hub-1.0.0-Portable.exe
+Monitoring Hub 1.0.11
 ```
 
-O build e bloqueado se ja existir um portable com a mesma versao em `dist/`, para evitar sobrescrever uma release aprovada. Antes de gerar uma nova build, incremente a versao:
+Arquivo gerado:
 
-```powershell
+```text
+Monitoring-Hub-1.0.11-Portable.exe
+```
+
+O build é bloqueado caso já exista um executável portable com a mesma versão em `dist/`, evitando sobrescrever uma release aprovada.
+
+Antes de gerar uma nova build, incremente a versão:
+
+```bash
 npm run version:patch --prefix electron-app
 npm run version:minor --prefix electron-app
 npm run version:major --prefix electron-app
 ```
 
-O script de limpeza do build remove apenas artefatos temporarios, como `win-unpacked`, e preserva executaveis versionados `Monitoring-Hub-*-Portable.exe`. Nao ha instalador nesta etapa.
+O script de limpeza do build remove apenas artefatos temporários, como `win-unpacked`, preservando executáveis versionados no padrão:
+
+```text
+Monitoring-Hub-*-Portable.exe
+```
+
+Não há instalador nesta etapa.
 
 ## Endpoints locais
 
-- `GET /` - entrega a interface web.
-- `GET /api/health` - health check local.
-- `GET /api/template/companies` - baixa modelo Excel de empresas.
-- `GET /api/companies` - lista empresas carregadas/persistidas, sem `api_key`.
-- `POST /api/import-companies` - importa Excel/CSV e substitui a base local.
-- `POST /api/pull-status` - consulta status nas APIs externas quando acionado pelo usuario.
+| Método | Endpoint | Descrição |
+|---|---|---|
+| GET | `/` | Entrega a interface web |
+| GET | `/api/health` | Health check local |
+| GET | `/api/template/companies` | Baixa o modelo Excel de empresas |
+| GET | `/api/companies` | Lista empresas carregadas/persistidas, sem expor `api_key` |
+| POST | `/api/import-companies` | Importa Excel/CSV e substitui a base local |
+| POST | `/api/pull-status` | Consulta status nas APIs externas quando acionado pelo usuário |
 
-## Importacao de empresas
+## Importação de empresas
 
 Formatos aceitos:
 
@@ -92,16 +120,16 @@ Formatos aceitos:
 - `.xls`
 - `.csv`
 
-Colunas obrigatorias, com pequenas variacoes aceitas:
+Colunas obrigatórias, com pequenas variações aceitas:
 
 - Nome da empresa
 - CNPJ
 - API Key
-- Sistema (`DIMEP` ou `MADIS`)
+- Sistema: DIMEP ou MADIS
 
-Uma nova importacao substitui a base anterior no SQLite local e limpa o cache de status.
+Uma nova importação substitui a base anterior no SQLite local e limpa o cache de status.
 
-## Persistencia local
+## Persistência local
 
 As empresas importadas ficam salvas em:
 
@@ -109,94 +137,111 @@ As empresas importadas ficam salvas em:
 %APPDATA%\Monitoring Hub\painel-monitoria.sqlite
 ```
 
-O sistema cria o banco automaticamente se ele ainda nao existir.
+O sistema cria o banco automaticamente caso ele ainda não exista.
 
-Salvo no banco:
+### Dados salvos no banco
 
-- nome da empresa
-- CNPJ/identifier
-- CNPJ somente numeros
+- Nome da empresa
+- CNPJ/identificador
+- CNPJ somente com números
 - API key
-- sistema
-- datas de criacao/atualizacao
+- Sistema
+- Datas de criação e atualização
 
-Nao e salvo no banco:
+### Dados não salvos no banco
 
-- resultado das consultas de status
-- historico de comunicacao
-- relatorios
-- logs de relogios
+- Resultado das consultas de status
+- Histórico de comunicação
+- Relatórios
+- Logs de relógios
 
-`api_key` fica somente no backend/banco. Ela nao deve aparecer no frontend, logs ou respostas publicas.
+A `api_key` fica restrita ao backend/banco local. Ela não deve aparecer no frontend, logs ou respostas públicas da aplicação.
 
-## Regras de negocio
+## Regras de negócio
 
-- Relogios com `RelogioDesativado = true` sao ignorados.
-- Ultima coleta acima de 1 hora e tratada como `Sem comunicacao`.
-- Datas sao convertidas para horario de Brasilia.
+- Relógios com `RelogioDesativado = true` são ignorados.
+- Última coleta acima de 1 hora é tratada como **Sem comunicação**.
+- Datas são convertidas para o horário de Brasília.
 - Existe cache de status por 60 segundos.
-- Existe regra especial por API key para uma empresa especifica, com bloqueio de codigos e filtro por IP nulo.
-- As APIs externas nao sao chamadas ao iniciar o sistema; apenas quando o usuario clica em `Puxar Status`.
+- As APIs externas não são chamadas ao iniciar o sistema.
+- A consulta de status ocorre apenas quando o usuário clica em **Puxar Status**.
+- Existem regras internas de tratamento para cenários específicos de integração, como bloqueio de equipamentos desativados e normalização dos dados retornados pelas APIs externas.
 
 ## Busca e filtros no frontend
 
-A lista de empresas tem controles discretos acima dos cards.
+A lista de empresas possui controles discretos acima dos cards.
 
-Busca:
+### Busca
 
-- por nome da empresa
-- por CNPJ formatado
-- por CNPJ somente numeros
+A busca pode ser realizada por:
 
-Filtros:
+- Nome da empresa
+- CNPJ formatado
+- CNPJ somente com números
+
+Quando não há resultado no sistema atual, a busca pode alternar automaticamente entre DIMEP e MADIS para localizar a empresa correspondente.
+
+### Filtros
+
+Filtros disponíveis:
 
 - Todas
-- Com falha
-- Sem comunicacao
-- Tudo comunicando
-- Sem status
+- Sem comunicação
+- Comunicando
 
-A ordenacao padrao prioriza empresas com problema e depois ordena por nome.
+A ordenação padrão prioriza empresas com maior criticidade e, dentro de cada grupo, ordena por nome.
+
+Também existe o botão **A-Z**, que permite alternar a ordenação alfabética.
 
 ## Electron portable
 
 O Electron:
 
-- inicia o backend interno;
-- aguarda `/api/health` antes de abrir a janela principal;
-- usa trava de instancia unica;
-- encerra o backend ao fechar o app;
-- usa `nodeIntegration: false`, `contextIsolation: true` e `sandbox: true`;
-- grava logs de startup em `%APPDATA%\Monitoring Hub\startup.log`.
+- Inicia o backend interno;
+- Aguarda o `/api/health` antes de abrir a janela principal;
+- Usa trava de instância única;
+- Encerra o backend ao fechar o app;
+- Usa `nodeIntegration: false`;
+- Usa `contextIsolation: true`;
+- Usa `sandbox: true`;
+- Grava logs de startup em `%APPDATA%\Monitoring Hub\startup.log`;
+- Permite minimizar para a bandeja do Windows;
+- Permite configurar a inicialização junto com o Windows.
 
-A lentidao inicial do portable pode acontecer antes do Electron iniciar, por extracao temporaria do executavel e/ou verificacao do antivirus. O backend interno, SQLite e health check ja foram otimizados.
+A lentidão inicial do portable pode ocorrer antes do Electron iniciar, devido à extração temporária do executável e/ou verificação do antivírus. O backend interno, SQLite e health check já foram otimizados.
 
 ## Testes
 
-Comando:
+Para executar os testes:
 
-```powershell
+```bash
 npm test
 ```
 
-Os testes atuais cobrem utilitarios de:
+Os testes atuais cobrem utilitários de:
 
-- CNPJ/identifier
-- empresa publica sem `api_key`
-- datas e regra de coleta vencida
-- identidade de relogio
-- sanitizacao de erros e segredos
+- CNPJ/identificador
+- Empresa pública sem `api_key`
+- Datas e regra de coleta vencida
+- Identidade de relógio
+- Sanitização de erros e segredos
 
-## Limitacoes atuais
+## Limitações atuais
 
 - Sem login.
-- Sem historico persistente de status.
-- Sem alertas automaticos.
-- Sem relatorios exportaveis.
+- Sem histórico persistente de status.
+- Sem alertas automáticos.
+- Sem relatórios exportáveis.
 - Sem instalador nesta etapa.
 
-## Documentacao completa
+## Documentação completa
 
-Veja:
+Veja também:
 
-- `DOCUMENTACAO_COMPLETA.md`
+```text
+DOCUMENTACAO_COMPLETA.md
+```
+
+## Autor
+
+Desenvolvido por **Arthur Figueiredo Saldanha**.
