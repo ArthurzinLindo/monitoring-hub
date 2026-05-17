@@ -74,13 +74,13 @@ Monitoring-Hub-<versao>-Portable.exe
 A release estável atual é:
 
 ```text
-Monitoring Hub 1.0.11
+Monitoring Hub 1.0
 ```
 
 Arquivo gerado:
 
 ```text
-Monitoring-Hub-1.0.11-Portable.exe
+Monitoring-Hub-1.0-Portable.exe
 ```
 
 O build é bloqueado caso já exista um executável portable com a mesma versão em `dist/`, evitando sobrescrever uma release aprovada.
