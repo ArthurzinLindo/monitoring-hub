@@ -5,6 +5,22 @@
   style.id = "electron-global-scrollbar-style";
   style.textContent = `
     @font-face {
+      font-family: "Inter";
+      src: url("/static/fonts/InterVariable.ttf") format("truetype");
+      font-weight: 100 900;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "Inter";
+      src: url("/static/fonts/InterVariable-Italic.ttf") format("truetype");
+      font-weight: 100 900;
+      font-style: italic;
+      font-display: swap;
+    }
+
+    @font-face {
       font-family: "SF Pro Text";
       src: url("/static/fonts/SF-Pro-Text-Regular.otf") format("opentype");
       font-weight: 400;
@@ -61,9 +77,9 @@
       --text-soft: #a7d0f5;
       --stroke: rgba(120, 188, 255, 0.34);
       --stroke-strong: rgba(145, 206, 255, 0.54);
-      --font-display: "SF Pro Display", "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      --font-body: "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
-      --font-mono: "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      --font-display: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+      --font-body: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+      --font-mono: "Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
     }
 
     html,
@@ -517,6 +533,32 @@
     .modal,
     .loading-overlay {
       filter: none !important;
+    }
+
+    .loading-overlay {
+      background: rgba(0, 12, 31, 0.46) !important;
+      backdrop-filter: blur(3px) saturate(116%) !important;
+      -webkit-backdrop-filter: blur(3px) saturate(116%) !important;
+    }
+
+    .loader-card.panel-glass {
+      border-color: rgba(132, 198, 255, 0.36) !important;
+      background:
+        radial-gradient(circle at 78% 0%, rgba(0, 188, 242, 0.16), transparent 46%),
+        linear-gradient(140deg, rgba(8, 24, 52, 0.58), rgba(8, 30, 63, 0.47)) !important;
+      box-shadow:
+        0 10px 34px rgba(0, 7, 20, 0.5),
+        0 0 26px rgba(20, 147, 255, 0.15),
+        inset 0 1px 0 rgba(190, 228, 255, 0.2),
+        inset 0 0 24px rgba(120, 188, 255, 0.07) !important;
+      backdrop-filter: blur(27px) saturate(158%) !important;
+      -webkit-backdrop-filter: blur(27px) saturate(158%) !important;
+    }
+
+    .loader-card.panel-glass::before {
+      background:
+        linear-gradient(125deg, rgba(176, 222, 255, 0.14), rgba(176, 222, 255, 0.025) 40%),
+        radial-gradient(circle at 80% 0%, rgba(0, 188, 242, 0.18), rgba(0, 188, 242, 0) 44%) !important;
     }
 
     .modal {

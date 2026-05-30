@@ -71,16 +71,16 @@ O Electron Builder utiliza essa versão para gerar o arquivo portable em `dist/`
 Monitoring-Hub-<versao>-Portable.exe
 ```
 
-A release estável atual é:
+A primeira release estável oficial é:
 
 ```text
-Monitoring Hub 1.0.11
+Monitoring Hub 1.0.0
 ```
 
-Arquivo gerado:
+Arquivo da release estável:
 
 ```text
-Monitoring-Hub-1.0.11-Portable.exe
+Monitoring-Hub-1.0.0-Portable.exe
 ```
 
 O build é bloqueado caso já exista um executável portable com a mesma versão em `dist/`, evitando sobrescrever uma release aprovada.
@@ -93,7 +93,7 @@ npm run version:minor --prefix electron-app
 npm run version:major --prefix electron-app
 ```
 
-O script de limpeza do build remove apenas artefatos temporários, como `win-unpacked`, preservando executáveis versionados no padrão:
+O script de limpeza do build remove apenas artefatos temporários, como `win-unpacked`, preservando executáveis portable no padrão:
 
 ```text
 Monitoring-Hub-*-Portable.exe

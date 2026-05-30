@@ -100,30 +100,60 @@
               </section>
             </article>
 
-            <aside class="panel-glass ops-panel">
-              <p class="section-kicker">Operacao</p>
-              <h2>Status geral</h2>
-
-              <div class="status-stack">
-                <article class="status-card ok-bg">
-                  <p>Comunicando</p>
-                  <strong id="communicatingClocks">0</strong>
-                </article>
-                <article class="status-card error-bg">
-                  <p>Sem comunicacao</p>
-                  <strong id="offlineClocks">0</strong>
-                </article>
-                <article class="status-card warn-bg">
-                  <p>Empresas com erro</p>
-                  <strong id="errorCompanies">0</strong>
-                </article>
+            <aside id="operationPanel" class="panel-glass ops-panel">
+              <div class="operation-header">
+                <div>
+                  <p class="section-kicker">Operacao</p>
+                  <h2 id="operationTitle">Status geral</h2>
+                </div>
+                <button
+                  id="operationNotificationsButton"
+                  class="operation-notification-button"
+                  type="button"
+                  aria-label="Ver notificacoes internas"
+                  aria-pressed="false"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+                    <path d="M18 9.8c0-3.1-2.1-5.4-5-6v-.6a1 1 0 0 0-2 0v.6c-2.9.6-5 2.9-5 6v3.7l-1.5 2.1a.8.8 0 0 0 .7 1.3h13.6a.8.8 0 0 0 .7-1.3L18 13.5V9.8Z"></path>
+                    <path d="M9.5 18.4a2.6 2.6 0 0 0 5 0"></path>
+                  </svg>
+                  <span id="operationNotificationDot" class="operation-notification-dot hidden" aria-hidden="true"></span>
+                </button>
               </div>
 
-              <button id="pullStatusButton" class="btn btn-cta" type="button" disabled>Puxar Status</button>
+              <div class="operation-view-stage">
+                <div id="operationStatusView" class="operation-view operation-status-view operation-view-active" aria-hidden="false">
+                  <div class="status-stack">
+                    <article class="status-card ok-bg">
+                      <p>Comunicando</p>
+                      <strong id="communicatingClocks">0</strong>
+                    </article>
+                    <article class="status-card error-bg">
+                      <p>Sem comunicacao</p>
+                      <strong id="offlineClocks">0</strong>
+                    </article>
+                    <article class="status-card warn-bg">
+                      <p>Empresas com erro</p>
+                      <strong id="errorCompanies">0</strong>
+                    </article>
+                  </div>
 
-              <p id="feedback" class="feedback" role="status" aria-live="polite"></p>
+                  <button id="pullStatusButton" class="btn btn-cta" type="button" disabled>Puxar Status</button>
 
-              <p id="cacheLabel" class="cache-label">Cache ativo: 0</p>
+                  <p id="feedback" class="feedback" role="status" aria-live="polite"></p>
+
+                  <p id="cacheLabel" class="cache-label">Cache ativo: 0</p>
+                </div>
+
+                <div id="operationNotificationsView" class="operation-view operation-notifications-view" aria-hidden="true">
+                  <div
+                    id="operationNotificationsList"
+                    class="operation-notifications-list"
+                    role="list"
+                    aria-live="polite"
+                  ></div>
+                </div>
+              </div>
             </aside>
           </section>
 

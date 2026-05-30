@@ -17,8 +17,11 @@ const APP_NAME = "Monitoring Hub";
 const DESKTOP_IPC_PIPE = "\\\\.\\pipe\\monitoring-hub-desktop-ipc";
 const DESKTOP_IPC_SHOW_DEBOUNCE_MS = 250;
 const EXPECTED_DESKTOP_IPC_ERROR_CODES = new Set(["EPIPE", "ECONNRESET", "ECONNREFUSED", "ENOENT"]);
-const CLOCK_IMAGE_WIDTH = 1920;
+const CLOCK_IMAGE_LAYOUT_WIDTH = 1920;
+const CLOCK_IMAGE_SCALE = 2;
+const CLOCK_IMAGE_WIDTH = CLOCK_IMAGE_LAYOUT_WIDTH * CLOCK_IMAGE_SCALE;
 const CLOCK_IMAGE_MAX_HEIGHT = 30000;
+const UI_FONT_STACK = '"Inter", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif';
 
 // O single instance lock do Electron usa dados da aplicacao. Em portable,
 // fixe o userData antes do lock para evitar locks separados por extracao temp.
@@ -776,24 +779,20 @@ function getUniqueExportPath(fileName) {
 function getExportFontFaceCss() {
   const fontsPath = path.join(getRuntimeRoot(), "public", "fonts");
   const fontFiles = [
-    ["SF Pro Text", "SF-Pro-Text-Regular.otf", 400],
-    ["SF Pro Text", "SF-Pro-Text-Medium.otf", 500],
-    ["SF Pro Text", "SF-Pro-Text-Semibold.otf", 600],
-    ["SF Pro Text", "SF-Pro-Text-Bold.otf", 700],
-    ["SF Pro Display", "SF-Pro-Display-Semibold.otf", 600],
-    ["SF Pro Display", "SF-Pro-Display-Bold.otf", 700],
+    ["Inter", "InterVariable.ttf", "100 900", "normal"],
+    ["Inter", "InterVariable-Italic.ttf", "100 900", "italic"],
   ];
 
   return fontFiles
     .filter(([, fileName]) => fs.existsSync(path.join(fontsPath, fileName)))
-    .map(([family, fileName, weight]) => {
+    .map(([family, fileName, weight, fontStyle]) => {
       const url = pathToFileURL(path.join(fontsPath, fileName)).href;
       return `
         @font-face {
           font-family: "${family}";
-          src: url("${url}") format("opentype");
+          src: url("${url}") format("truetype");
           font-weight: ${weight};
-          font-style: normal;
+          font-style: ${fontStyle};
           font-display: swap;
         }
       `;
@@ -878,17 +877,24 @@ function buildClockImageHtml(payload) {
       margin: 0;
       width: ${CLOCK_IMAGE_WIDTH}px;
       min-height: 100%;
-      overflow-x: hidden;
+      overflow: hidden;
+      background: #020817;
+    }
+    .export-scale-root {
+      width: ${CLOCK_IMAGE_LAYOUT_WIDTH}px;
+      min-height: 100%;
+      padding: 46px;
       background:
         radial-gradient(circle at 14% 8%, rgba(27, 152, 255, 0.5), transparent 31%),
         radial-gradient(circle at 86% 6%, rgba(0, 188, 242, 0.34), transparent 30%),
         radial-gradient(circle at 62% 102%, rgba(45, 209, 125, 0.16), transparent 32%),
         linear-gradient(150deg, #020817 6%, #031436 38%, #073579 100%);
       color: #f0f8ff;
-      font-family: "SF Pro Text", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+      font-family: ${UI_FONT_STACK};
       font-variant-numeric: tabular-nums;
+      transform: scale(${CLOCK_IMAGE_SCALE});
+      transform-origin: top left;
     }
-    body { padding: 46px; }
     .page {
       position: relative;
       width: 100%;
@@ -947,7 +953,7 @@ function buildClockImageHtml(payload) {
     h1 {
       margin: 0;
       color: #f3f9ff;
-      font-family: "SF Pro Display", "SF Pro Text", "Segoe UI Variable", sans-serif;
+      font-family: ${UI_FONT_STACK};
       font-size: 38px;
       line-height: 1.12;
       font-weight: 700;
@@ -988,7 +994,7 @@ function buildClockImageHtml(payload) {
       border: 1px solid rgba(255, 255, 255, 0.18);
       color: #f7fffb;
       font-size: 15px;
-      font-weight: 600;
+      font-weight: 500;
       letter-spacing: 0.01em;
       box-shadow:
         inset 0 1px 0 rgba(255, 255, 255, 0.2),
@@ -1127,6 +1133,7 @@ function buildClockImageHtml(payload) {
       flex: 1 1 auto;
       font-size: 18px;
       line-height: 1.18;
+      font-weight: 500;
       white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
@@ -1191,21 +1198,23 @@ function buildClockImageHtml(payload) {
   </style>
 </head>
 <body>
-  <main class="page">
-    <header class="export-header">
-      <p class="software">${escapeHtml(payload.softwareName)}</p>
-      <h1>${escapeHtml(payload.company.name)}</h1>
-      <p class="subtitle-line">CNPJ ${escapeHtml(payload.company.identifier)} | Ativos: ${escapeHtml(String(payload.company.activeClockCount))} | Atualizado em ${escapeHtml(payload.company.updatedAt)}</p>
-    </header>
-    <section class="toolbar" aria-label="Controles visuais da exportacao">
-      <div class="filter-pills">
-        ${renderExportFilterPills(payload.filterLabel)}
-      </div>
-    </section>
-    <section class="clock-grid ${isCompact ? "compact" : "normal"}">
-      ${cards}
-    </section>
-  </main>
+  <div class="export-scale-root">
+    <main class="page">
+      <header class="export-header">
+        <p class="software">${escapeHtml(payload.softwareName)}</p>
+        <h1>${escapeHtml(payload.company.name)}</h1>
+        <p class="subtitle-line">CNPJ ${escapeHtml(payload.company.identifier)} | Ativos: ${escapeHtml(String(payload.company.activeClockCount))} | Atualizado em ${escapeHtml(payload.company.updatedAt)}</p>
+      </header>
+      <section class="toolbar" aria-label="Controles visuais da exportacao">
+        <div class="filter-pills">
+          ${renderExportFilterPills(payload.filterLabel)}
+        </div>
+      </section>
+      <section class="clock-grid ${isCompact ? "compact" : "normal"}">
+        ${cards}
+      </section>
+    </main>
+  </div>
 </body>
 </html>`;
 }
@@ -1240,30 +1249,40 @@ async function captureClockImage(payload) {
     const fontStatus = await exportWindow.webContents.executeJavaScript(`
       document.fonts
         ? ({
-            sfProText: document.fonts.check('400 18px "SF Pro Text"'),
-            sfProDisplay: document.fonts.check('700 38px "SF Pro Display"'),
+            inter: document.fonts.check('400 18px "Inter"'),
+            segoeUi: document.fonts.check('400 18px "Segoe UI"'),
             faces: Array.from(document.fonts).map((font) => ({
               family: font.family,
               weight: font.weight,
               status: font.status
             }))
           })
-        : { sfProText: false, sfProDisplay: false, faces: [] }
+        : { inter: false, segoeUi: false, faces: [] }
     `);
     await new Promise((resolve) => setTimeout(resolve, 100));
 
     const dimensions = await exportWindow.webContents.executeJavaScript(`
-      ({
-        width: Math.ceil(Math.max(document.documentElement.scrollWidth, document.body.scrollWidth)),
-        height: Math.ceil(Math.max(document.documentElement.scrollHeight, document.body.scrollHeight))
-      })
+      (() => {
+        const surface = document.querySelector(".export-scale-root");
+        const rect = surface.getBoundingClientRect();
+        return {
+          width: Math.ceil(rect.width),
+          height: Math.ceil(rect.height),
+          logicalWidth: Math.ceil(surface.scrollWidth),
+          logicalHeight: Math.ceil(surface.scrollHeight)
+        };
+      })()
     `);
 
-    const contentHeight = Math.max(600, Number(dimensions.height) || 1000);
+    const contentHeight = Math.max(600 * CLOCK_IMAGE_SCALE, Number(dimensions.height) || 1000 * CLOCK_IMAGE_SCALE);
     if (contentHeight > CLOCK_IMAGE_MAX_HEIGHT) {
-      throw new Error(`Imagem muito alta para exportacao em PNG unico: ${contentHeight}px.`);
+      throw new Error(`Imagem muito alta para exportacao em PNG unico 2x: ${contentHeight}px.`);
     }
 
+    await exportWindow.webContents.executeJavaScript(`
+      document.documentElement.style.height = "${contentHeight}px";
+      document.body.style.height = "${contentHeight}px";
+    `);
     exportWindow.setContentSize(CLOCK_IMAGE_WIDTH, contentHeight);
     await new Promise((resolve) => setTimeout(resolve, 120));
 

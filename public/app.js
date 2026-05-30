@@ -13,8 +13,12 @@
   wasAutoSwitchedBySearch: false,
   isPullingStatus: false,
   isModalLayoutAnimating: false,
+  isOperationViewAnimating: false,
   isAutoRefreshSyncing: false,
   lastSeenAutoRefreshRevision: 0,
+  operationView: "status",
+  criticalNotifications: [],
+  operationNotificationsTimer: null,
   desktopPreferences: {
     startWithWindows: false,
     minimizeToTray: false,
@@ -24,6 +28,10 @@
 const MODAL_LAYOUT_STORAGE_KEY = "painel_clock_layout";
 const MODAL_LAYOUT_LEAVE_MS = 130;
 const MODAL_LAYOUT_ENTER_MS = 170;
+const OPERATION_VIEW_ENTER_MS = 260;
+const CRITICAL_NOTIFICATION_THRESHOLD_MS = 72 * 60 * 60 * 1000;
+const OPERATION_NOTIFICATIONS_IDLE_MS = 30 * 1000;
+const DISMISSED_NOTIFICATIONS_STORAGE_KEY = "painel_dismissed_notifications";
 
 function nowMs() {
   return performance.now();
@@ -44,6 +52,13 @@ const elements = {
   currentTime: document.getElementById("currentTime"),
   excelInput: document.getElementById("excelInput"),
   importButton: document.getElementById("importButton"),
+  operationPanel: document.getElementById("operationPanel"),
+  operationTitle: document.getElementById("operationTitle"),
+  operationNotificationsButton: document.getElementById("operationNotificationsButton"),
+  operationNotificationDot: document.getElementById("operationNotificationDot"),
+  operationStatusView: document.getElementById("operationStatusView"),
+  operationNotificationsView: document.getElementById("operationNotificationsView"),
+  operationNotificationsList: document.getElementById("operationNotificationsList"),
   pullStatusButton: document.getElementById("pullStatusButton"),
   feedback: document.getElementById("feedback"),
   totalCompanies: document.getElementById("totalCompanies"),
@@ -159,6 +174,404 @@ function setLoading(isLoading, message = "Consultando APIs...") {
   elements.loadingText.textContent = message;
   elements.loadingOverlay.classList.toggle("hidden", !isLoading);
   elements.loadingOverlay.setAttribute("aria-hidden", String(!isLoading));
+}
+
+function parseLastCollectionTimestamp(value) {
+  const text = String(value || "").trim();
+  if (!text || text === "-" || text.toLowerCase() === "null") {
+    return null;
+  }
+
+  const brtMatch = text.match(/^(\d{2})\/(\d{2})\/(\d{4})\s+(\d{2}):(\d{2})(?::(\d{2}))?$/);
+  if (brtMatch) {
+    const [, day, month, year, hour, minute, second = "0"] = brtMatch;
+    const parsed = new Date(
+      Number(year),
+      Number(month) - 1,
+      Number(day),
+      Number(hour),
+      Number(minute),
+      Number(second),
+    );
+
+    if (
+      parsed.getFullYear() === Number(year) &&
+      parsed.getMonth() === Number(month) - 1 &&
+      parsed.getDate() === Number(day) &&
+      parsed.getHours() === Number(hour) &&
+      parsed.getMinutes() === Number(minute)
+    ) {
+      return parsed.getTime();
+    }
+    return null;
+  }
+
+  const timestamp = Date.parse(text);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function getClockLastCollectionValue(clock) {
+  return (
+    clock?.last_collection_brt ||
+    clock?.lastCollectionBrt ||
+    clock?.last_collection ||
+    clock?.lastCollection ||
+    ""
+  );
+}
+
+function normalizeClockCodeKey(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function getLocalDateKey(date = new Date()) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function normalizeNotificationKeyPart(value) {
+  return normalizeSearchText(value).replace(/\s+/g, " ");
+}
+
+function buildCriticalNotificationKey(company, status, clock) {
+  const system = normalizeNotificationKeyPart(company?.system || status?.system || state.selectedSystem || "-");
+  const companyKey = normalizeNotificationKeyPart(`${company?.id || "-"}|${company?.name || "-"}`);
+  const clockCode = normalizeClockCodeKey(clock?.code || "-");
+  return `${system}|${companyKey}|${clockCode}`;
+}
+
+function getDismissedNotificationsState() {
+  const today = getLocalDateKey();
+  try {
+    const stored = JSON.parse(localStorage.getItem(DISMISSED_NOTIFICATIONS_STORAGE_KEY) || "{}");
+    if (stored?.date === today && stored?.items && typeof stored.items === "object") {
+      return stored;
+    }
+  } catch {
+    // Dados locais invalidos sao descartados para manter a lista consistente.
+  }
+
+  const cleanState = { date: today, items: {} };
+  try {
+    localStorage.setItem(DISMISSED_NOTIFICATIONS_STORAGE_KEY, JSON.stringify(cleanState));
+  } catch {
+    // Sem localStorage, a dispensa apenas deixa de persistir.
+  }
+  return cleanState;
+}
+
+function isNotificationDismissed(notificationKey) {
+  if (!notificationKey) {
+    return false;
+  }
+  return Boolean(getDismissedNotificationsState().items?.[notificationKey]);
+}
+
+function dismissCriticalNotification(notificationKey) {
+  if (!notificationKey) {
+    return;
+  }
+
+  const dismissedState = getDismissedNotificationsState();
+  dismissedState.items[notificationKey] = true;
+  try {
+    localStorage.setItem(DISMISSED_NOTIFICATIONS_STORAGE_KEY, JSON.stringify(dismissedState));
+  } catch {
+    // A UI ainda remove a notificacao em memoria mesmo se a persistencia local falhar.
+  }
+
+  state.criticalNotifications = state.criticalNotifications.filter(
+    (notification) => notification.dismissKey !== notificationKey,
+  );
+  renderOperationNotifications();
+}
+
+function getCriticalClockNotifications() {
+  const now = Date.now();
+  const notifications = [];
+  getDismissedNotificationsState();
+
+  state.companies.forEach((company) => {
+    const status = getStatus(company.id);
+    const clocks = Array.isArray(status?.clocks) ? status.clocks : [];
+
+    clocks.forEach((clock) => {
+      const lastCollectionMs = parseLastCollectionTimestamp(getClockLastCollectionValue(clock));
+      if (!lastCollectionMs) {
+        return;
+      }
+
+      const ageMs = now - lastCollectionMs;
+      if (ageMs < CRITICAL_NOTIFICATION_THRESHOLD_MS) {
+        return;
+      }
+
+      const dismissKey = buildCriticalNotificationKey(company, status, clock);
+      if (isNotificationDismissed(dismissKey)) {
+        return;
+      }
+
+      notifications.push({
+        companyId: company.id,
+        companySystem: String(company.system || status?.system || "-"),
+        companyName: String(company.name || "-"),
+        clockName: String(clock?.name || "-"),
+        clockCode: String(clock?.code ?? "-"),
+        clockCodeKey: normalizeClockCodeKey(clock?.code),
+        dismissKey,
+        lastCollectionMs,
+      });
+    });
+  });
+
+  return notifications.sort((a, b) => a.lastCollectionMs - b.lastCollectionMs);
+}
+
+function createOperationNotificationItem(notification) {
+  const item = document.createElement("article");
+  item.className = "operation-notification-item";
+  item.setAttribute("role", "listitem");
+  item.setAttribute("tabindex", "0");
+  item.setAttribute("aria-label", `Abrir ${notification.clockName} em ${notification.companyName}`);
+
+  const content = document.createElement("div");
+  content.className = "operation-notification-content";
+
+  const clockName = document.createElement("h3");
+  clockName.textContent = notification.clockName;
+
+  const details = document.createElement("p");
+  details.textContent = `Código ${notification.clockCode}`;
+
+  const company = document.createElement("p");
+  company.textContent = notification.companyName;
+
+  const dismissButton = document.createElement("button");
+  dismissButton.type = "button";
+  dismissButton.className = "operation-notification-dismiss";
+  dismissButton.setAttribute("aria-label", `Dispensar notificação de ${notification.clockName}`);
+  dismissButton.textContent = "×";
+  dismissButton.addEventListener("click", (event) => {
+    event.stopPropagation();
+    dismissCriticalNotification(notification.dismissKey);
+  });
+
+  content.append(clockName, details, company);
+  item.append(content, dismissButton);
+  item.addEventListener("click", () => openNotificationClock(notification));
+  item.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" && event.key !== " ") {
+      return;
+    }
+
+    if (event.target === dismissButton) {
+      return;
+    }
+
+    event.preventDefault();
+    openNotificationClock(notification);
+  });
+  return item;
+}
+
+function renderOperationNotifications() {
+  const notifications = state.criticalNotifications;
+  elements.operationNotificationDot?.classList.toggle("hidden", notifications.length === 0);
+
+  if (!elements.operationNotificationsList) {
+    return;
+  }
+
+  elements.operationNotificationsList.innerHTML = "";
+  if (!notifications.length) {
+    const empty = document.createElement("p");
+    empty.className = "operation-notifications-empty";
+    empty.textContent = "Nenhuma notificação crítica.";
+    elements.operationNotificationsList.appendChild(empty);
+    return;
+  }
+
+  notifications.forEach((notification) => {
+    elements.operationNotificationsList.appendChild(createOperationNotificationItem(notification));
+  });
+}
+
+function getCompanyFromNotification(notification) {
+  return (
+    state.companies.find((company) => company.id === notification.companyId) ||
+    state.companies.find((company) => company.name === notification.companyName) ||
+    null
+  );
+}
+
+function highlightModalClockCard(clockCodeKey) {
+  if (!clockCodeKey || !elements.modalCardsGrid) {
+    return false;
+  }
+
+  const cards = Array.from(elements.modalCardsGrid.querySelectorAll(".modal-clock-card"));
+  const targetCard = cards.find((card) => card.dataset.clockCodeKey === clockCodeKey);
+  if (!targetCard) {
+    return false;
+  }
+
+  targetCard.scrollIntoView({ behavior: "smooth", block: "center" });
+  targetCard.classList.remove("modal-clock-card-highlight");
+  window.requestAnimationFrame(() => {
+    targetCard.classList.add("modal-clock-card-highlight");
+    window.setTimeout(() => {
+      targetCard.classList.remove("modal-clock-card-highlight");
+    }, 1800);
+  });
+  return true;
+}
+
+function openNotificationClock(notification) {
+  const company = getCompanyFromNotification(notification);
+  if (!company) {
+    return;
+  }
+
+  openModal(company.id, {
+    filter: "offline",
+    layout: "normal",
+    highlightClockCodeKey: notification.clockCodeKey || normalizeClockCodeKey(notification.clockCode),
+  });
+}
+
+function updateCriticalNotifications() {
+  state.criticalNotifications = getCriticalClockNotifications();
+  renderOperationNotifications();
+}
+
+function clearOperationNotificationsIdleTimer() {
+  if (state.operationNotificationsTimer) {
+    clearTimeout(state.operationNotificationsTimer);
+    state.operationNotificationsTimer = null;
+  }
+}
+
+function resetOperationNotificationsIdleTimer() {
+  if (state.operationView !== "notifications") {
+    return;
+  }
+
+  clearOperationNotificationsIdleTimer();
+  state.operationNotificationsTimer = window.setTimeout(() => {
+    setOperationView("status");
+  }, OPERATION_NOTIFICATIONS_IDLE_MS);
+}
+
+function getOperationViewElement(view) {
+  return view === "notifications" ? elements.operationNotificationsView : elements.operationStatusView;
+}
+
+function shouldAnimateOperationViewChange() {
+  return (
+    !window.matchMedia("(prefers-reduced-motion: reduce)").matches &&
+    Boolean(elements.operationPanel && elements.operationStatusView && elements.operationNotificationsView)
+  );
+}
+
+function waitForOperationViewFrame(durationMs) {
+  return new Promise((resolve) => {
+    window.setTimeout(resolve, durationMs);
+  });
+}
+
+function clearOperationViewAnimationClasses() {
+  elements.operationPanel?.classList.remove("is-operation-transitioning");
+  elements.operationPanel?.removeAttribute("data-operation-next-view");
+  elements.operationNotificationsButton?.classList.remove("is-operation-clicking");
+  elements.operationStatusView?.classList.remove("operation-view-entering");
+  elements.operationNotificationsView?.classList.remove("operation-view-entering");
+}
+
+function applyOperationViewState(view) {
+  const nextView = view === "notifications" ? "notifications" : "status";
+  const isNotifications = nextView === "notifications";
+
+  state.operationView = nextView;
+  elements.operationPanel?.setAttribute("data-operation-view", nextView);
+  if (elements.operationTitle) {
+    elements.operationTitle.textContent = isNotifications ? "Notificações" : "Status geral";
+  }
+  elements.operationNotificationsButton?.setAttribute("aria-pressed", String(isNotifications));
+
+  elements.operationStatusView?.classList.toggle("operation-view-active", !isNotifications);
+  elements.operationStatusView?.setAttribute("aria-hidden", String(isNotifications));
+  elements.operationNotificationsView?.classList.toggle("operation-view-active", isNotifications);
+  elements.operationNotificationsView?.setAttribute("aria-hidden", String(!isNotifications));
+}
+
+function updateOperationViewIdleTimer() {
+  const isNotifications = state.operationView === "notifications";
+
+  if (isNotifications) {
+    resetOperationNotificationsIdleTimer();
+  } else {
+    clearOperationNotificationsIdleTimer();
+  }
+}
+
+async function setOperationView(view) {
+  const nextView = view === "notifications" ? "notifications" : "status";
+  const currentView = state.operationView === "notifications" ? "notifications" : "status";
+  const isNotifications = nextView === "notifications";
+
+  if (state.isOperationViewAnimating) {
+    return;
+  }
+
+  if (nextView === currentView) {
+    applyOperationViewState(nextView);
+    updateOperationViewIdleTimer();
+    return;
+  }
+
+  if (!shouldAnimateOperationViewChange()) {
+    applyOperationViewState(nextView);
+    updateOperationViewIdleTimer();
+    return;
+  }
+
+  state.isOperationViewAnimating = true;
+  clearOperationViewAnimationClasses();
+
+  const nextElement = getOperationViewElement(nextView);
+
+  try {
+    elements.operationPanel.classList.add("is-operation-transitioning");
+    elements.operationPanel.setAttribute("data-operation-next-view", nextView);
+    elements.operationNotificationsButton?.classList.add("is-operation-clicking");
+
+    applyOperationViewState(nextView);
+    nextElement?.classList.add("operation-view-entering");
+    await waitForOperationViewFrame(OPERATION_VIEW_ENTER_MS);
+  } finally {
+    clearOperationViewAnimationClasses();
+    state.isOperationViewAnimating = false;
+    updateOperationViewIdleTimer();
+  }
+}
+
+function toggleOperationNotifications() {
+  setOperationView(state.operationView === "notifications" ? "status" : "notifications");
+}
+
+function setupOperationPanelInteractions() {
+  elements.operationNotificationsButton?.addEventListener("click", toggleOperationNotifications);
+
+  if (!elements.operationPanel) {
+    return;
+  }
+
+  ["click", "mousemove", "focusin", "keydown"].forEach((eventName) => {
+    elements.operationPanel.addEventListener(eventName, resetOperationNotificationsIdleTimer);
+  });
+  elements.operationPanel.addEventListener("scroll", resetOperationNotificationsIdleTimer, true);
 }
 
 function updateButtonsState() {
@@ -860,6 +1273,7 @@ async function importCompanies() {
 
     state.companies = payload.companies || [];
     state.statusesById.clear();
+    updateCriticalNotifications();
 
     setOperationalSummary([], { from_cache: 0 });
     elements.lastUpdateLabel.textContent = "-";
@@ -884,6 +1298,7 @@ function syncStatuses(companies = []) {
   companies.forEach((item) => {
     state.statusesById.set(item.id, item);
   });
+  updateCriticalNotifications();
 }
 
 async function pullStatus(forceRefresh = false, clickStartedAt = nowMs()) {
@@ -979,7 +1394,7 @@ function closeModal() {
   state.selectedCompanyId = null;
 }
 
-function openModal(companyId) {
+function openModal(companyId, options = {}) {
   const company = state.companies.find((item) => item.id === companyId);
   const status = getStatus(companyId);
   if (!company || !status) {
@@ -987,7 +1402,10 @@ function openModal(companyId) {
   }
 
   state.selectedCompanyId = companyId;
-  state.modalFilter = "all";
+  state.modalFilter = ["all", "online", "offline"].includes(options.filter) ? options.filter : "all";
+  if (options.layout === "normal" || options.layout === "compact") {
+    state.modalLayout = options.layout;
+  }
 
   elements.modalTitle.textContent = company.name;
   elements.modalSubtitle.textContent = `CNPJ ${company.identifier} | Ativos: ${status.active_clock_count} | Atualizado em ${status.updated_at}`;
@@ -997,6 +1415,12 @@ function openModal(companyId) {
 
   elements.companyModal.classList.remove("hidden");
   elements.companyModal.setAttribute("aria-hidden", "false");
+
+  if (options.highlightClockCodeKey) {
+    window.setTimeout(() => {
+      highlightModalClockCard(options.highlightClockCodeKey);
+    }, 80);
+  }
 }
 
 function getModalRows() {
@@ -1058,6 +1482,7 @@ function createClockDetailCard(clock) {
 
   const card = document.createElement("article");
   card.className = `modal-clock-card ${statusClass}`;
+  card.dataset.clockCodeKey = normalizeClockCodeKey(clock.code);
 
   const header = document.createElement("header");
   header.className = "modal-clock-header";
@@ -1111,6 +1536,7 @@ function createClockCompactCard(clock) {
 
   const card = document.createElement("article");
   card.className = `modal-clock-card modal-clock-card-compact ${statusClass}`;
+  card.dataset.clockCodeKey = normalizeClockCodeKey(clock.code);
 
   const top = document.createElement("div");
   top.className = "compact-clock-top";
@@ -1245,9 +1671,11 @@ async function init() {
   state.modalLayout = getStoredModalLayout();
   setupModalLayoutToggle();
   setupModalExportControls();
+  setupOperationPanelInteractions();
   await loadDesktopPreferences();
   updateButtonsState();
   setOperationalSummary([], { from_cache: 0 });
+  updateCriticalNotifications();
   renderDashboard();
   startClock();
   refreshEnvironmentStatus();
@@ -1261,6 +1689,7 @@ async function init() {
     }
 
     state.companies = payload.companies || [];
+    updateCriticalNotifications();
     renderDashboard();
     updateButtonsState();
 

@@ -1,6 +1,6 @@
 {
   "name": "painelmonitoria",
-  "version": "1.0.0",
+  "version": "1.0.15",
   "description": "Aplicacao web local para importar empresas via Excel e monitorar status de comunicacao de relogios de ponto por API.",
   "main": "server.js",
   "scripts": {
