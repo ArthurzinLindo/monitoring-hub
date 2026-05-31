@@ -212,7 +212,6 @@ function startupLog(event, details = {}) {
   }
 
   try {
-    const fs = require("fs");
     fs.appendFileSync(
       logPath,
       `[startup] ${JSON.stringify({ scope: "backend", event, ...details })}\n`,

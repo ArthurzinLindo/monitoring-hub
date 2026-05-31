@@ -519,7 +519,6 @@ function updateOperationViewIdleTimer() {
 async function setOperationView(view) {
   const nextView = view === "notifications" ? "notifications" : "status";
   const currentView = state.operationView === "notifications" ? "notifications" : "status";
-  const isNotifications = nextView === "notifications";
 
   if (state.isOperationViewAnimating) {
     return;
@@ -1336,20 +1335,17 @@ async function pullStatus(forceRefresh = false, clickStartedAt = nowMs()) {
     });
     responseReceivedAt = nowMs();
 
-    const jsonStartedAt = nowMs();
     const payload = await response.json();
     jsonParsedAt = nowMs();
     if (!response.ok) {
       throw new Error(parseErrorMessage(payload));
     }
 
-    const stateStartedAt = nowMs();
     syncStatuses(payload.companies || []);
     setOperationalSummary(payload.companies || [], payload.summary || {});
     elements.lastUpdateLabel.textContent = payload.updated_at || "-";
     stateUpdatedAt = nowMs();
 
-    const renderStartedAt = nowMs();
     renderDashboard();
     renderFinishedAt = nowMs();
     payloadCompanyCount = payload.companies?.length || 0;
