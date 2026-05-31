@@ -250,6 +250,26 @@ function durationSince(startedAt) {
   return Date.now() - startedAt;
 }
 
+function createSystemCounters() {
+  return { DIMEP: 0, MADIS: 0 };
+}
+
+function incrementSystemCounter(counters, system, amount = 1) {
+  const key = system || "UNKNOWN";
+  counters[key] = (counters[key] || 0) + amount;
+  return counters;
+}
+
+function maskIdentifierForLog(identifier) {
+  const digits = sanitizeIdentifier(identifier);
+  if (!digits) {
+    return null;
+  }
+
+  const visibleDigits = digits.slice(-4);
+  return `${"*".repeat(Math.max(0, digits.length - visibleDigits.length))}${visibleDigits}`;
+}
+
 function getEnvironmentStatus(referenceTime = Date.now()) {
   const environmentActive = Boolean(
     lastPullStatusRequestAt && referenceTime - lastPullStatusRequestAt.getTime() <= ENVIRONMENT_ACTIVE_WINDOW_MS,
@@ -300,21 +320,50 @@ function logAutoRefresh(event, details = {}) {
 function createCompanyPerformanceMetric(company, index) {
   return {
     index,
-    company_id: company.id,
-    company_name: company.name,
+    company_ref: `${company.system || "UNKNOWN"}-${index + 1}`,
     system: company.system,
-    identifier: company.identifier,
+    identifier_masked: maskIdentifierForLog(company.identifier),
     started_at: new Date().toISOString(),
     from_cache: false,
+    status: "pending",
     http_status: null,
     http_attempts: 0,
     http_error_code: null,
     external_http_ms: 0,
     normalization_ms: 0,
+    cache_update_ms: 0,
     raw_clock_count: 0,
+    normalized_clock_count: 0,
     active_clock_count: 0,
+    communicating_count: 0,
     not_communicating_count: 0,
     total_ms: 0,
+    error_message: null,
+  };
+}
+
+function createCompanyPerformanceSummary(metric) {
+  return {
+    company_ref: metric.company_ref,
+    system: metric.system,
+    identifier_masked: metric.identifier_masked,
+    status: metric.status,
+    from_cache: metric.from_cache,
+    total_ms: metric.total_ms,
+    external_http_ms: metric.external_http_ms,
+    normalization_ms: metric.normalization_ms,
+    cache_update_ms: metric.cache_update_ms,
+    http_status: metric.http_status,
+    http_error_code: metric.http_error_code,
+    active_clock_count: metric.active_clock_count,
+    not_communicating_count: metric.not_communicating_count,
+  };
+}
+
+function createCompanyErrorSummary(metric) {
+  return {
+    ...createCompanyPerformanceSummary(metric),
+    error_message: metric.error_message,
   };
 }
 
@@ -912,8 +961,10 @@ async function pullCompanyStatus(company, forceRefresh, perfMetric = null) {
   if (cached) {
     if (perfMetric) {
       perfMetric.from_cache = true;
+      perfMetric.status = cached.status || "unknown";
       perfMetric.raw_clock_count = Array.isArray(cached.clocks) ? cached.clocks.length : 0;
       perfMetric.active_clock_count = Number(cached.active_clock_count) || 0;
+      perfMetric.communicating_count = Number(cached.communicating_count) || 0;
       perfMetric.not_communicating_count = Number(cached.not_communicating_count) || 0;
       perfMetric.total_ms = durationSince(companyStartedAt);
     }
@@ -952,16 +1003,31 @@ async function pullCompanyStatus(company, forceRefresh, perfMetric = null) {
 
     if (perfMetric) {
       perfMetric.raw_clock_count = rawClocks.length;
+      perfMetric.normalized_clock_count = normalizedClocks.length;
       perfMetric.active_clock_count = activeClocks.length;
+      perfMetric.communicating_count = communicating.length;
       perfMetric.not_communicating_count = notCommunicating.length;
+      perfMetric.status = status;
+      perfMetric.error_message = status === "error"
+        ? errorMessage || "Empresa com relogios sem comunicacao."
+        : null;
       perfMetric.normalization_ms = durationSince(normalizationStartedAt);
-      perfMetric.total_ms = durationSince(companyStartedAt);
     }
 
+    const cacheUpdateStartedAt = nowMs();
     setCachedStatus(company, responsePayload);
+    if (perfMetric) {
+      perfMetric.cache_update_ms = durationSince(cacheUpdateStartedAt);
+      perfMetric.total_ms = durationSince(companyStartedAt);
+    }
     return responsePayload;
   } catch (error) {
     if (perfMetric) {
+      const sanitizedError = sanitizeErrorForLog(error);
+      perfMetric.status = "error";
+      perfMetric.http_status = perfMetric.http_status || error?.response?.status || null;
+      perfMetric.http_error_code = perfMetric.http_error_code || error?.code || error?.name || null;
+      perfMetric.error_message = sanitizedError.message;
       perfMetric.total_ms = durationSince(companyStartedAt);
     }
     return buildApiFailureStatus(company, error);
@@ -1090,6 +1156,7 @@ async function runPullStatus({ forceRefresh = false, trigger = "manual" } = {}) 
   const endpointStartedAt = nowMs();
   const requestId = `${trigger}-${endpointStartedAt}-${Math.random().toString(16).slice(2, 8)}`;
   const companyMetrics = [];
+  const preparationStartedAt = endpointStartedAt;
 
   if (!companies.length) {
     appendPullStatusPerformanceLog({
@@ -1097,6 +1164,7 @@ async function runPullStatus({ forceRefresh = false, trigger = "manual" } = {}) 
       event: "empty_companies",
       trigger,
       total_ms: durationSince(endpointStartedAt),
+      request_preparation_ms: durationSince(preparationStartedAt),
       force_refresh: forceRefresh,
     });
     throw createPublicError("Importe um arquivo Excel antes de puxar status.");
@@ -1104,12 +1172,14 @@ async function runPullStatus({ forceRefresh = false, trigger = "manual" } = {}) 
 
   const systemCounts = companies.reduce(
     (acc, company) => {
-      acc[company.system] = (acc[company.system] || 0) + 1;
+      incrementSystemCounter(acc, company.system);
       return acc;
     },
-    { DIMEP: 0, MADIS: 0 },
+    createSystemCounters(),
   );
+  const requestPreparationMs = durationSince(preparationStartedAt);
 
+  const companyProcessingStartedAt = nowMs();
   const results = await mapWithConcurrency(companies, STATUS_CONCURRENCY_LIMIT, async (company, index) => {
     const metric = createCompanyPerformanceMetric(company, index);
     companyMetrics.push(metric);
@@ -1117,45 +1187,78 @@ async function runPullStatus({ forceRefresh = false, trigger = "manual" } = {}) 
       return await pullCompanyStatus(company, forceRefresh, metric);
     } catch (error) {
       console.error("Falha inesperada ao consultar empresa:", sanitizeErrorForLog(error, {
-        company_id: company.id,
+        company_ref: metric.company_ref,
         system: company.system,
-        identifier: company.identifier,
+        identifier_masked: metric.identifier_masked,
       }));
+      metric.status = "error";
+      metric.error_message = sanitizeErrorForLog(error).message;
       metric.total_ms = metric.total_ms || durationSince(Date.parse(metric.started_at));
       return buildErrorStatus(company, "Erro interno ao consultar status da empresa.");
     }
   });
+  const companyProcessingWallMs = durationSince(companyProcessingStartedAt);
+
   results.sort((a, b) => {
     const systemOrder = a.system.localeCompare(b.system, "pt-BR");
     if (systemOrder !== 0) return systemOrder;
     return String(a.name || "").localeCompare(String(b.name || ""), "pt-BR");
   });
 
+  const responseAssemblyStartedAt = nowMs();
+  const healthyCompanies = results.filter((item) => item.status === "ok").length;
+  const unhealthyCompanies = results.filter((item) => item.status === "error").length;
+  const fromCacheCompanies = results.filter((item) => item.from_cache).length;
   const responsePayload = {
     total: results.length,
     updated_at: formatNowBrt(),
     summary: {
-      healthy_companies: results.filter((item) => item.status === "ok").length,
-      unhealthy_companies: results.filter((item) => item.status === "error").length,
-      from_cache: results.filter((item) => item.from_cache).length,
+      healthy_companies: healthyCompanies,
+      unhealthy_companies: unhealthyCompanies,
+      from_cache: fromCacheCompanies,
     },
     grouped: groupCompaniesBySystem(results),
     companies: results,
   };
+  const responseAssemblyMs = durationSince(responseAssemblyStartedAt);
 
-  const responseAssemblyStartedAt = nowMs();
-  const response_assembly_ms = durationSince(responseAssemblyStartedAt);
+  const responseCacheUpdateStartedAt = nowMs();
+  lastPullStatusPayload = structuredClone(responsePayload);
+  const responseCacheUpdateMs = durationSince(responseCacheUpdateStartedAt);
+
   const endpoint_total_ms = durationSince(endpointStartedAt);
   const cachedCompanies = companyMetrics.filter((item) => item.from_cache).length;
   const externalCompanies = companyMetrics.length - cachedCompanies;
+  const totalHttpAttempts = companyMetrics.reduce((acc, item) => acc + item.http_attempts, 0);
   const totalExternalHttpMs = companyMetrics.reduce((acc, item) => acc + item.external_http_ms, 0);
   const totalNormalizationMs = companyMetrics.reduce((acc, item) => acc + item.normalization_ms, 0);
+  const totalCacheUpdateMs = companyMetrics.reduce((acc, item) => acc + item.cache_update_ms, 0) + responseCacheUpdateMs;
   const totalCompanyMs = companyMetrics.reduce((acc, item) => acc + item.total_ms, 0);
+  const totalRawClocks = companyMetrics.reduce((acc, item) => acc + item.raw_clock_count, 0);
+  const totalNormalizedClocks = companyMetrics.reduce((acc, item) => acc + item.normalized_clock_count, 0);
+  const totalActiveClocks = companyMetrics.reduce((acc, item) => acc + item.active_clock_count, 0);
+  const totalNotCommunicatingClocks = companyMetrics.reduce((acc, item) => acc + item.not_communicating_count, 0);
   const aggregateInternalProcessingMs = companyMetrics.reduce(
     (acc, item) => acc + Math.max(0, item.total_ms - item.external_http_ms),
     0,
   );
-  const slowestCompany = [...companyMetrics].sort((a, b) => b.total_ms - a.total_ms)[0] || null;
+  const externalHttpBySystemMs = companyMetrics.reduce((acc, item) => {
+    incrementSystemCounter(acc, item.system, item.external_http_ms);
+    return acc;
+  }, createSystemCounters());
+  const normalizationBySystemMs = companyMetrics.reduce((acc, item) => {
+    incrementSystemCounter(acc, item.system, item.normalization_ms);
+    return acc;
+  }, createSystemCounters());
+  const slowestCompanies = [...companyMetrics]
+    .sort((a, b) => b.total_ms - a.total_ms)
+    .slice(0, 3)
+    .map(createCompanyPerformanceSummary);
+  const errorCompanies = companyMetrics
+    .filter((item) => item.status === "error")
+    .sort((a, b) => b.total_ms - a.total_ms)
+    .slice(0, 10)
+    .map(createCompanyErrorSummary);
 
   appendPullStatusPerformanceLog({
     request_id: requestId,
@@ -1163,32 +1266,36 @@ async function runPullStatus({ forceRefresh = false, trigger = "manual" } = {}) 
     trigger,
     force_refresh: forceRefresh,
     endpoint_total_ms,
+    request_preparation_ms: requestPreparationMs,
+    company_processing_wall_ms: companyProcessingWallMs,
     companies_total: companies.length,
+    companies_processed: results.length,
     systems: systemCounts,
     cached_companies: cachedCompanies,
     external_companies: externalCompanies,
+    success_companies: healthyCompanies,
+    error_companies: unhealthyCompanies,
     concurrency_limit: STATUS_CONCURRENCY_LIMIT,
     average_company_ms: companyMetrics.length ? Math.round(totalCompanyMs / companyMetrics.length) : 0,
-    slowest_company: slowestCompany
-      ? {
-          company_id: slowestCompany.company_id,
-          company_name: slowestCompany.company_name,
-          system: slowestCompany.system,
-          identifier: slowestCompany.identifier,
-          total_ms: slowestCompany.total_ms,
-          external_http_ms: slowestCompany.external_http_ms,
-          http_status: slowestCompany.http_status,
-        }
-      : null,
-    total_external_http_ms: totalExternalHttpMs,
-    total_normalization_ms: totalNormalizationMs,
-    response_assembly_ms,
+    http_attempts_total: totalHttpAttempts,
+    external_http_aggregate_ms: totalExternalHttpMs,
+    external_http_by_system_ms: externalHttpBySystemMs,
+    normalization_aggregate_ms: totalNormalizationMs,
+    normalization_by_system_ms: normalizationBySystemMs,
+    response_assembly_ms: responseAssemblyMs,
+    cache_update_ms: totalCacheUpdateMs,
+    response_cache_update_ms: responseCacheUpdateMs,
+    raw_clock_count_total: totalRawClocks,
+    normalized_clock_count_total: totalNormalizedClocks,
+    active_clock_count_total: totalActiveClocks,
+    not_communicating_clock_count_total: totalNotCommunicatingClocks,
     aggregate_internal_processing_ms: aggregateInternalProcessingMs,
     endpoint_non_external_wall_ms: Math.max(0, endpoint_total_ms - Math.max(...companyMetrics.map((item) => item.external_http_ms), 0)),
-    companies: companyMetrics.sort((a, b) => a.index - b.index),
+    slowest_companies: slowestCompanies,
+    error_company_samples: errorCompanies,
+    error_company_samples_total: unhealthyCompanies,
   });
 
-  lastPullStatusPayload = structuredClone(responsePayload);
   return responsePayload;
 }
 
