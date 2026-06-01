@@ -4,23 +4,14 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const tempDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "monitoring-hub-log-tests-"));
-process.env.PAINEL_MONITORIA_DATA_DIR = tempDataDir;
-
 const {
-  __testing,
-} = require("../../server");
-
-const {
+  PULL_STATUS_PERF_LOG_FILENAME,
   PULL_STATUS_PERF_LOG_MAX_BYTES,
+  createPerformanceLogger,
   sanitizePerformanceLogText,
   stringifyPerformanceLogPayload,
   trimPerformanceLogTextToLimit,
-} = __testing;
-
-test.after(() => {
-  fs.rmSync(tempDataDir, { recursive: true, force: true });
-});
+} = require("../../src/utils/performanceLog");
 
 test("sanitizePerformanceLogText mascara CNPJ formatado e sequencia de 14 digitos", () => {
   const input = 'empresa 12.345.678/0001-90 id 12345678000190';
@@ -72,4 +63,42 @@ test("trimPerformanceLogTextToLimit mantem linhas finais sanitizadas", () => {
   assert.equal(trimmed.includes("12.345.678/0001-90"), false);
   assert.equal(trimmed.includes("manual-19"), true);
   assert.equal(trimmed.endsWith("\n"), true);
+});
+
+test("createPerformanceLogger sanitiza historico e escreve novo registro seguro", () => {
+  const tempDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "monitoring-hub-log-tests-"));
+  const logPath = path.join(tempDataDir, PULL_STATUS_PERF_LOG_FILENAME);
+
+  try {
+    fs.writeFileSync(
+      logPath,
+      `[pull-status] {"event":"completed","identifier":"12.345.678/0001-90","authorization":"Bearer secret-token-123456"}\n`,
+      "utf8",
+    );
+
+    const logger = createPerformanceLogger({
+      getDataDir: () => tempDataDir,
+      startupLog: () => {},
+    });
+
+    logger.prepareLogFile();
+    logger.appendLog({
+      event: "completed",
+      endpoint_total_ms: 120,
+      identifier: "12345678000190",
+      api_key: "secretapikey123456",
+      body: { TodosRelogios: true },
+    });
+
+    const text = fs.readFileSync(logPath, "utf8");
+
+    assert.equal(text.includes("12.345.678/0001-90"), false);
+    assert.equal(text.includes("12345678000190"), false);
+    assert.equal(text.includes("secret-token-123456"), false);
+    assert.equal(text.includes("secretapikey123456"), false);
+    assert.equal(text.includes("TodosRelogios"), false);
+    assert.match(text, /"endpoint_total_ms":120/);
+  } finally {
+    fs.rmSync(tempDataDir, { recursive: true, force: true });
+  }
 });
