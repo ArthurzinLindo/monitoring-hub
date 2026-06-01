@@ -1629,6 +1629,12 @@ module.exports = {
   initializeAppData,
   startServer,
   stopServer,
+  __testing: {
+    PULL_STATUS_PERF_LOG_MAX_BYTES,
+    sanitizePerformanceLogText,
+    stringifyPerformanceLogPayload,
+    trimPerformanceLogTextToLimit,
+  },
 };
 
 if (require.main === module) {
