@@ -13,6 +13,15 @@ const {
   trimPerformanceLogTextToLimit,
 } = require("../../src/utils/performanceLog");
 
+function assertNoRawSensitiveValue(text) {
+  assert.equal(text.includes("12.345.678/0001-90"), false);
+  assert.equal(text.includes("12345678000190"), false);
+  assert.equal(text.includes("super-secret-api-key-123"), false);
+  assert.equal(text.includes("secret-token-123456789"), false);
+  assert.equal(text.includes("raw-response-payload"), false);
+  assert.equal(/(?<!\d)\d{14}(?!\d)/.test(text), false);
+}
+
 test("sanitizePerformanceLogText mascara CNPJ formatado e sequencia de 14 digitos", () => {
   const input = 'empresa 12.345.678/0001-90 id 12345678000190';
   const sanitized = sanitizePerformanceLogText(input);
@@ -49,6 +58,51 @@ test("stringifyPerformanceLogPayload redige campos sensiveis e preserva metricas
   assert.equal(serialized.includes("TodosRelogios"), false);
   assert.match(serialized, /"endpoint_total_ms":1234/);
   assert.match(serialized, /"companies_processed":2/);
+});
+
+test("sanitizePerformanceLogText redige erro HTTP simulado com identificadores sensiveis", () => {
+  const sanitized = sanitizePerformanceLogText(
+    "HTTP 401 api_key=super-secret-api-key-123 token=secret-token-123456789 "
+      + "authorization: Bearer abcdefghijklmnop "
+      + '"headers":{"authorization":"Bearer abcdefghijklmnop"} '
+      + '"body":{"cnpj":"12.345.678/0001-90","raw":"raw-response-payload"} '
+      + '"payload":{"id":"12345678000190"}',
+  );
+
+  assertNoRawSensitiveValue(sanitized);
+  assert.match(sanitized, /Bearer \*\*\*REDACTED\*\*\*/);
+});
+
+test("stringifyPerformanceLogPayload preserva metricas e sanitiza erro HTTP simulado", () => {
+  const serialized = stringifyPerformanceLogPayload({
+    event: "completed",
+    endpoint_total_ms: 987,
+    companies_processed: 4,
+    success_companies: 3,
+    error_companies: 1,
+    error_company_samples: [
+      {
+        system: "MADIS",
+        http_status: 401,
+        error_message: "Falha api_key=super-secret-api-key-123 token=secret-token-123456789 12.345.678/0001-90",
+        headers: { authorization: "Bearer abcdefghijklmnop" },
+        body: { raw: "raw-response-payload", cnpj: "12345678000190" },
+      },
+    ],
+    slowest_companies: [
+      {
+        company_ref: "company-1",
+        identifier_masked: "12345678000190",
+        total_ms: 320,
+      },
+    ],
+  });
+
+  assertNoRawSensitiveValue(serialized);
+  assert.match(serialized, /"endpoint_total_ms":987/);
+  assert.match(serialized, /"companies_processed":4/);
+  assert.match(serialized, /"error_companies":1/);
+  assert.match(serialized, /"http_status":401/);
 });
 
 test("trimPerformanceLogTextToLimit mantem linhas finais sanitizadas", () => {

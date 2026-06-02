@@ -8,6 +8,10 @@ const {
   isPrimitiveRecordValue,
   parseBool,
 } = require("../../src/utils/recordValue");
+const {
+  dimepClockRecord,
+  madisClockRecord,
+} = require("../fixtures/clockRecords");
 
 test("parseBool preserva booleanos e numeros", () => {
   assert.equal(parseBool(true), true);
@@ -104,4 +108,15 @@ test("getValueFromRecord usa fallback para chaves expandidas", () => {
 test("getValueFromRecord retorna null quando alias nao existe", () => {
   assert.equal(getValueFromRecord({ codigo: "1" }, ["ip"]), null);
   assert.equal(getValueFromRecord(null, ["codigo"]), null);
+});
+
+test("getValueFromRecord extrai campos comuns de fixtures sinteticas de relogios", () => {
+  assert.equal(getValueFromRecord(dimepClockRecord, ["codigo", "codigorelogio"]), "003");
+  assert.equal(getValueFromRecord(dimepClockRecord, ["numero fabricacao", "numerofabricacao"]), "FAB-0003");
+  assert.equal(parseBool(getValueFromRecord(dimepClockRecord, ["comunicando"])), false);
+
+  assert.equal(getValueFromRecord(madisClockRecord, ["codigo relogio", "codigorelogio"]), "7");
+  assert.equal(getValueFromRecord(madisClockRecord, ["descricao", "nome"]), "MADIS OUTLET");
+  assert.equal(getValueFromRecord(madisClockRecord, ["numero de fabricacao"]), "MADIS-0007");
+  assert.equal(parseBool(getValueFromRecord(madisClockRecord, ["status comunicacao"])), true);
 });
