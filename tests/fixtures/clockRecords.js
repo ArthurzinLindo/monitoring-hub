@@ -19,7 +19,30 @@ const madisClockRecord = {
   },
 };
 
+const dimepNestedClockRecord = {
+  Equipamento: {
+    CodigoRelogio: { valor: "015" },
+    NomeRelogio: { texto: "DIMEP RECEPCAO" },
+    EnderecoIp: "192.0.2.15",
+  },
+  Status: {
+    DataHoraUltimaColeta: { value: "2026-05-27T09:30:00" },
+    EmComunicacao: "sim",
+  },
+};
+
+const madisOfflineClockRecord = {
+  Codigo: "21",
+  Descricao: "MADIS GARAGEM",
+  NumeroSerial: "MADIS-0021",
+  Ip: null,
+  UltimaComunicacao: "2026-05-20T07:00:00",
+  Online: "offline",
+};
+
 module.exports = {
   dimepClockRecord,
+  dimepNestedClockRecord,
   madisClockRecord,
+  madisOfflineClockRecord,
 };

@@ -10,7 +10,9 @@ const {
 } = require("../../src/utils/recordValue");
 const {
   dimepClockRecord,
+  dimepNestedClockRecord,
   madisClockRecord,
+  madisOfflineClockRecord,
 } = require("../fixtures/clockRecords");
 
 test("parseBool preserva booleanos e numeros", () => {
@@ -119,4 +121,16 @@ test("getValueFromRecord extrai campos comuns de fixtures sinteticas de relogios
   assert.equal(getValueFromRecord(madisClockRecord, ["descricao", "nome"]), "MADIS OUTLET");
   assert.equal(getValueFromRecord(madisClockRecord, ["numero de fabricacao"]), "MADIS-0007");
   assert.equal(parseBool(getValueFromRecord(madisClockRecord, ["status comunicacao"])), true);
+});
+
+test("getValueFromRecord suporta variacoes sinteticas aninhadas DIMEP e MADIS", () => {
+  assert.equal(getValueFromRecord(dimepNestedClockRecord, ["codigo relogio"]), "015");
+  assert.equal(getValueFromRecord(dimepNestedClockRecord, ["nome relogio"]), "DIMEP RECEPCAO");
+  assert.equal(getValueFromRecord(dimepNestedClockRecord, ["data hora ultima coleta"]), "2026-05-27T09:30:00");
+  assert.equal(parseBool(getValueFromRecord(dimepNestedClockRecord, ["em comunicacao"])), true);
+
+  assert.equal(getValueFromRecord(madisOfflineClockRecord, ["codigo"]), "21");
+  assert.equal(getValueFromRecord(madisOfflineClockRecord, ["numero serial"]), "MADIS-0021");
+  assert.equal(getValueFromRecord(madisOfflineClockRecord, ["ultima comunicacao"]), "2026-05-20T07:00:00");
+  assert.equal(parseBool(getValueFromRecord(madisOfflineClockRecord, ["online"])), false);
 });
