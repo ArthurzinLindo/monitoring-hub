@@ -55,6 +55,12 @@ function createWorkbookBuffer(rows) {
   return XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
 }
 
+function createImportForm(fileBuffer, fileName, contentType = "application/octet-stream") {
+  const formData = new FormData();
+  formData.append("file", new Blob([fileBuffer], { type: contentType }), fileName);
+  return formData;
+}
+
 test("GET /api/health retorna contrato publico sem segredo", async () => {
   const { response, text, body } = await requestJson("/api/health");
 
@@ -155,13 +161,10 @@ test("POST /api/import-companies e GET /api/companies nao expoem credenciais", a
       Sistema: "MADIS",
     },
   ]);
-  const formData = new FormData();
-  formData.append(
-    "file",
-    new Blob([workbookBuffer], {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    }),
+  const formData = createImportForm(
+    workbookBuffer,
     "empresas-sinteticas.xlsx",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   );
 
   const imported = await requestJson("/api/import-companies", {
@@ -183,4 +186,115 @@ test("POST /api/import-companies e GET /api/companies nao expoem credenciais", a
   assert.equal(listed.text.includes("api_key"), false);
   secrets.forEach((secret) => assert.equal(listed.text.includes(secret), false));
   assert.equal(require.cache[axiosModulePath], undefined);
+});
+
+test("POST /api/import-companies sem arquivo retorna erro controlado", async () => {
+  const { response, text, body } = await requestJson("/api/import-companies", {
+    method: "POST",
+    body: new FormData(),
+  });
+
+  assert.equal(response.status, 400);
+  assert.equal(body.detail, "Arquivo invalido.");
+  assert.equal(text.includes("api_key"), false);
+});
+
+test("POST /api/import-companies rejeita extensao nao suportada sem alterar empresas", async () => {
+  const invalidForm = createImportForm(Buffer.from("conteudo sintetico"), "empresas.txt", "text/plain");
+  const imported = await requestJson("/api/import-companies", {
+    method: "POST",
+    body: invalidForm,
+  });
+
+  assert.equal(imported.response.status, 400);
+  assert.equal(imported.body.detail, "Formato invalido. Use .xlsx, .xls ou .csv.");
+
+  const listed = await requestJson("/api/companies");
+  assert.equal(listed.response.status, 200);
+  assert.equal(listed.body.total, 2);
+  assert.equal(listed.text.includes("api_key"), false);
+});
+
+test("POST /api/import-companies rejeita planilha sem colunas obrigatorias", async () => {
+  const workbookBuffer = createWorkbookBuffer([
+    {
+      "Nome da empresa": "Empresa Sintetica Sem Chave",
+      CNPJ: "30.000.000/0001-03",
+      Sistema: "DIMEP",
+    },
+  ]);
+  const formData = createImportForm(workbookBuffer, "sem-chave.xlsx");
+  const imported = await requestJson("/api/import-companies", {
+    method: "POST",
+    body: formData,
+  });
+
+  assert.equal(imported.response.status, 400);
+  assert.equal(imported.body.detail, "Colunas obrigatorias ausentes: API key.");
+  assert.equal(imported.text.includes("api_key"), false);
+
+  const listed = await requestJson("/api/companies");
+  assert.equal(listed.body.total, 2);
+});
+
+test("POST /api/import-companies rejeita arquivo sem linhas validas", async () => {
+  const syntheticSecret = "synthetic-invalid-system-key";
+  const workbookBuffer = createWorkbookBuffer([
+    {
+      "Nome da empresa": "Empresa Sintetica Invalida",
+      CNPJ: "40.000.000/0001-04",
+      "API Key": syntheticSecret,
+      Sistema: "OUTRO",
+    },
+  ]);
+  const formData = createImportForm(workbookBuffer, "sistema-invalido.xlsx");
+  const imported = await requestJson("/api/import-companies", {
+    method: "POST",
+    body: formData,
+  });
+
+  assert.equal(imported.response.status, 400);
+  assert.equal(imported.body.detail, "Nenhuma empresa valida encontrada no arquivo.");
+  assert.equal(imported.text.includes(syntheticSecret), false);
+  assert.equal(imported.text.includes("api_key"), false);
+
+  const listed = await requestJson("/api/companies");
+  assert.equal(listed.body.total, 2);
+});
+
+test("POST /api/import-companies substitui empresas no ambiente isolado", async () => {
+  const syntheticSecret = "synthetic-replacement-key";
+  const workbookBuffer = createWorkbookBuffer([
+    {
+      "Nome da empresa": "Empresa Sintetica Substituta",
+      CNPJ: "50.000.000/0001-05",
+      "API Key": syntheticSecret,
+      Sistema: "MADIS",
+    },
+  ]);
+  const formData = createImportForm(workbookBuffer, "substituicao.xlsx");
+  const imported = await requestJson("/api/import-companies", {
+    method: "POST",
+    body: formData,
+  });
+
+  assert.equal(imported.response.status, 200);
+  assert.equal(imported.body.total, 1);
+  assert.deepEqual(imported.body.warnings, []);
+  assert.equal(imported.body.grouped.DIMEP.length, 0);
+  assert.equal(imported.body.grouped.MADIS.length, 1);
+  assert.equal(imported.text.includes(syntheticSecret), false);
+  assert.equal(imported.text.includes("api_key"), false);
+
+  const listed = await requestJson("/api/companies");
+  assert.equal(listed.response.status, 200);
+  assert.equal(listed.body.total, 1);
+  assert.deepEqual(
+    Object.keys(listed.body.companies[0]).sort(),
+    ["id", "identifier", "name", "system"],
+  );
+  assert.equal(listed.body.companies[0].name, "Empresa Sintetica Substituta");
+  assert.equal(listed.body.companies[0].system, "MADIS");
+  assert.equal(listed.text.includes(syntheticSecret), false);
+  assert.equal(listed.text.includes("api_key"), false);
 });
