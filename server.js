@@ -9,26 +9,22 @@ const { DB_PATH, initializeDatabase } = require("./src/database/connection");
 const { runMigrations } = require("./src/database/migrations");
 const companyRepository = require("./src/repositories/companyRepository");
 const { parseCompanies } = require("./src/services/companyImport");
-const { normalizeKey } = require("./src/utils/text");
+const {
+  dedupeClocks,
+  findClockList,
+  normalizeClockItem,
+} = require("./src/services/clockNormalization");
 const {
   sanitizeIdentifier,
   buildIdentifierCandidates,
 } = require("./src/utils/identifier");
-const {
-  parseDateUtc,
-  formatBrazilDatetime,
-  formatNowBrt,
-  isStaleCollection,
-} = require("./src/utils/datetime");
+const { formatNowBrt } = require("./src/utils/datetime");
 const {
   companyToPublic,
   groupCompaniesBySystem,
 } = require("./src/utils/company");
 const {
-  isNullIp,
   normalizeClockCode,
-  normalizeClockIdentityValue,
-  buildClockIdentityKey,
 } = require("./src/utils/clock");
 const {
   redactSensitiveText,
@@ -37,11 +33,6 @@ const {
   sanitizeErrorForLog,
 } = require("./src/utils/errors");
 const { createPerformanceLogger } = require("./src/utils/performanceLog");
-const {
-  extractPrimitiveRecordValue,
-  getValueFromRecord,
-  parseBool,
-} = require("./src/utils/recordValue");
 
 const app = express();
 const upload = multer({
@@ -61,7 +52,6 @@ const SYSTEM_BASE_URLS = {
 const CLOCK_SEARCH_ENDPOINT = "/RestServiceApi/Clock/SearchClocks";
 const REQUEST_PAYLOAD = { TodosRelogios: true };
 const CACHE_TTL_MS = 60 * 1000;
-const MAX_COLLECTION_AGE_MS = 60 * 60 * 1000;
 const ENVIRONMENT_ACTIVE_WINDOW_MS = 60 * 60 * 1000;
 const AUTO_REFRESH_WINDOW_MS = 90 * 60 * 1000;
 const AUTO_REFRESH_CHECK_INTERVAL_MS = 60 * 1000;
@@ -124,51 +114,6 @@ const SPECIAL_COMPANY_RULES = {
       "9999",
     ]),
   },
-};
-
-const CLOCK_FIELD_ALIASES = {
-  disabled: ["relogiodesativado", "relogio desativado", "isdisabled", "disabled"],
-  code: [
-    "codigo",
-    "codigorelogio",
-    "cod",
-    "clockid",
-    "idrelogio",
-    "id",
-    "relogionumero",
-    "numerorelogio",
-    "clocknumber",
-    "numero",
-  ],
-  name: ["nome", "nomerelogio", "relogionome", "descricao", "clockname"],
-  // Alias para campo solicitado no painel: NumeroFabricacao.
-  fabrication_number: [
-    "numerofabricacao",
-    "numero fabricacao",
-    "numero de fabricacao",
-    "fabricacao",
-    "numerofabricacaorelogio",
-    "numerofabricacaoequipamento",
-    "numerodeserieequipamento",
-    "numeroserie",
-    "numeroserial",
-    "nroserie",
-    "nroserial",
-    "numerodeserie",
-    "numero de serie",
-    "serialnumber",
-    "serial",
-  ],
-  ip: ["ip", "enderecoip", "endereco ip", "iprelogio", "relogioip", "host"],
-  last_collection: [
-    "ultimacoleta",
-    "ultimostatus",
-    "datahoraultimacoleta",
-    "lastcollection",
-    "ultimacomunicacao",
-    "dataultimacomunicacao",
-  ],
-  communicating: ["comunicando", "emcomunicacao", "statuscomunicacao", "iscommunicating", "online"],
 };
 
 let companies = [];
@@ -409,139 +354,6 @@ function setCachedStatus(company, payload) {
   });
 }
 
-function findFabricationNumberFallback(record) {
-  const candidates = [];
-  const visited = new WeakSet();
-
-  function visit(node, depth = 0) {
-    if (depth > 6 || node === undefined || node === null) {
-      return;
-    }
-
-    if (Array.isArray(node)) {
-      node.forEach((item) => visit(item, depth + 1));
-      return;
-    }
-
-    if (typeof node !== "object") {
-      return;
-    }
-
-    if (visited.has(node)) {
-      return;
-    }
-    visited.add(node);
-
-    Object.entries(node).forEach(([rawKey, value]) => {
-      const key = normalizeKey(rawKey);
-      if (!key) {
-        return;
-      }
-
-      const isFabricationKey =
-        key.includes("numerofabricacao") ||
-        key.includes("fabricacao") ||
-        key.includes("numerodeserie") ||
-        key.includes("numeroserie") ||
-        key.includes("numeroserial") ||
-        key.includes("serialnumber") ||
-        key.includes("serial") ||
-        key.includes("serie");
-
-      if (isFabricationKey) {
-        const primitive = extractPrimitiveRecordValue(value, depth + 1);
-        const text = String(primitive ?? "").trim();
-        if (text && normalizeKey(text) !== "null") {
-          let score = 1;
-          if (key.includes("numerofabricacao")) score = 5;
-          else if (key.includes("numerodeserie") || key.includes("numeroserie") || key.includes("numeroserial")) score = 4;
-          else if (key.includes("serialnumber")) score = 3;
-          else if (key.includes("fabricacao")) score = 2;
-          candidates.push({ score, value: text });
-        }
-      }
-
-      if (value && typeof value === "object") {
-        visit(value, depth + 1);
-      }
-    });
-  }
-
-  visit(record);
-  if (!candidates.length) {
-    return null;
-  }
-
-  candidates.sort((a, b) => b.score - a.score);
-  return candidates[0].value;
-}
-
-function choosePreferredClock(existing, candidate) {
-  if (!existing.is_communicating && candidate.is_communicating) {
-    return candidate;
-  }
-  if (existing.last_collection_brt === "-" && candidate.last_collection_brt !== "-") {
-    return candidate;
-  }
-  if (existing.ip === "-" && candidate.ip !== "-") {
-    return candidate;
-  }
-  if (existing.fabrication_number === "-" && candidate.fabrication_number !== "-") {
-    return candidate;
-  }
-  if (existing.name === "Relogio sem nome" && candidate.name !== "Relogio sem nome") {
-    return candidate;
-  }
-  return existing;
-}
-
-function dedupeClocks(clocks) {
-  const uniqueClocks = new Map();
-
-  for (const clock of clocks) {
-    const key = buildClockIdentityKey(clock);
-    const existing = uniqueClocks.get(key);
-    uniqueClocks.set(key, existing ? choosePreferredClock(existing, clock) : clock);
-  }
-
-  return [...uniqueClocks.values()];
-}
-
-function normalizeClockItem(record) {
-  let communicationFlag = parseBool(getValueFromRecord(record, CLOCK_FIELD_ALIASES.communicating));
-  const disabled = parseBool(getValueFromRecord(record, CLOCK_FIELD_ALIASES.disabled));
-
-  const code = getValueFromRecord(record, CLOCK_FIELD_ALIASES.code);
-  const name = getValueFromRecord(record, CLOCK_FIELD_ALIASES.name);
-  const fabricationNumberRaw =
-    getValueFromRecord(record, CLOCK_FIELD_ALIASES.fabrication_number) ||
-    findFabricationNumberFallback(record);
-  const fabricationNumber = String(fabricationNumberRaw || "").trim();
-  const ipRaw = getValueFromRecord(record, CLOCK_FIELD_ALIASES.ip);
-  const lastCollection = getValueFromRecord(record, CLOCK_FIELD_ALIASES.last_collection);
-  const ipIsNull = isNullIp(ipRaw);
-
-  if (communicationFlag === null) {
-    communicationFlag = parseDateUtc(lastCollection) !== null;
-  }
-
-  if (isStaleCollection(lastCollection, MAX_COLLECTION_AGE_MS)) {
-    communicationFlag = false;
-  }
-
-  return {
-    code: String(code || "-"),
-    name: String(name || "Relogio sem nome"),
-    // Mantem valor pronto para exibir no card do modal.
-    fabrication_number: fabricationNumber || "-",
-    ip: ipIsNull ? "-" : String(ipRaw).trim(),
-    ip_is_null: ipIsNull,
-    last_collection_brt: formatBrazilDatetime(lastCollection),
-    is_communicating: Boolean(communicationFlag),
-    is_disabled: Boolean(disabled),
-  };
-}
-
 function applyCompanySpecificFilters(company, clocks) {
   const apiKey = String(company.api_key || "").trim().toLowerCase();
   const rule = SPECIAL_COMPANY_RULES[apiKey];
@@ -552,37 +364,6 @@ function applyCompanySpecificFilters(company, clocks) {
     filtered = filtered.filter((clock) => Boolean(clock.ip_is_null));
   }
   return filtered;
-}
-
-function findClockList(node) {
-  if (Array.isArray(node)) {
-    if (!node.length) return [];
-    if (node.every((item) => item && typeof item === "object" && !Array.isArray(item))) {
-      return node;
-    }
-    return null;
-  }
-
-  if (!node || typeof node !== "object") {
-    return null;
-  }
-
-  const preferredKeys = new Set(["relogios", "clocklist", "clocks", "lista", "items", "dados", "data", "resultado", "result", "obj"]);
-
-  for (const [key, value] of Object.entries(node)) {
-    if (preferredKeys.has(normalizeKey(key)) && Array.isArray(value)) {
-      return value;
-    }
-  }
-
-  for (const value of Object.values(node)) {
-    const found = findClockList(value);
-    if (found !== null) {
-      return found;
-    }
-  }
-
-  return null;
 }
 
 function extractHttpErrorMessage(errorResponse, secrets = []) {
