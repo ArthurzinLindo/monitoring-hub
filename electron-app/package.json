@@ -1,6 +1,6 @@
 {
   "name": "painel-monitoria-electron",
-  "version": "1.0.26",
+  "version": "1.0.27",
   "description": "Aplicativo desktop Windows para o Monitoring Hub.",
   "main": "main.js",
   "author": "",
